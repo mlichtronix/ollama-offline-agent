@@ -1,0 +1,64 @@
+{
+  "name": "ollama-offline-agent",
+  "displayName": "Ollama Offline Coding Agent",
+  "description": "Offline autonomous coding agent using a local Ollama server.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:ollamaOffline.ask",
+    "onCommand:ollamaOffline.stop",
+    "onCommand:ollamaOffline.health",
+    "onCommand:ollamaOffline.selectModel",
+    "onCommand:ollamaOffline.openSkills",
+    "onCommand:ollamaOffline.newChat",
+    "onCommand:ollamaOffline.openChatEditor"
+    ,"onCommand:ollamaOffline.moveChatToSecondarySidebar"
+    ,"onView:ollamaOffline.chat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "ollamaOffline.ask", "title": "Ollama Offline Agent: Ask Agent" },
+      { "command": "ollamaOffline.stop", "title": "Ollama Offline Agent: Stop Current Run" },
+      { "command": "ollamaOffline.health", "title": "Ollama Offline Agent: Check Local Ollama" },
+      { "command": "ollamaOffline.selectModel", "title": "Ollama Offline Agent: Select Installed Model", "icon": { "light": "media/icons/brain-light.svg", "dark": "media/icons/brain-dark.svg" } },
+      { "command": "ollamaOffline.openSkills", "title": "Ollama Offline Agent: Open Local Skills Folder" },
+      { "command": "ollamaOffline.newChat", "title": "Ollama Offline Agent: Start New Chat", "icon": { "light": "media/icons/plus-light.svg", "dark": "media/icons/plus-dark.svg" } },
+      { "command": "ollamaOffline.openChatEditor", "title": "Ollama Offline Agent: Open Chat in Editor" }
+      ,{ "command": "ollamaOffline.moveChatToSecondarySidebar", "title": "Ollama Offline Agent: Open in Secondary Side Bar…" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "ollamaOffline", "title": "Ollama Agent", "icon": "media/ollama-dark.svg" }
+      ]
+    },
+    "views": {
+      "ollamaOffline": [
+        { "id": "ollamaOffline.chat", "name": "Offline Agent Chat", "type": "webview" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "ollamaOffline.newChat", "when": "view == ollamaOffline.chat", "group": "navigation@1" },
+        { "command": "ollamaOffline.selectModel", "when": "view == ollamaOffline.chat", "group": "navigation@2" }
+      ]
+    },
+    "configuration": {
+      "title": "Ollama Offline Agent",
+      "properties": {
+        "ollamaOffline.model": { "type": "string", "default": "", "description": "Locally installed Ollama model used by the agent. Empty selects the first locally installed model." },
+        "ollamaOffline.language": { "type": "string", "default": "auto", "description": "Preferred language for agent replies. Auto follows the language of the newest user message; the UI initially reflects the VS Code language." },
+        "ollamaOffline.temperature": { "type": "number", "default": 0.2, "minimum": 0, "maximum": 2, "description": "Sampling temperature for the local model." },
+        "ollamaOffline.contextWindow": { "type": "number", "default": 0, "minimum": 0, "maximum": 262144, "description": "Ollama num_ctx value. 0 uses the model/Ollama default." },
+        "ollamaOffline.endpoint": { "type": "string", "default": "http://127.0.0.1:11434", "description": "Local Ollama HTTP endpoint." },
+        "ollamaOffline.maxSteps": { "type": "number", "default": 0, "minimum": 0, "maximum": 200, "description": "Maximum model/tool turns per task. 0 means no step limit." },
+        "ollamaOffline.commandTimeoutSeconds": { "type": "number", "default": 0, "minimum": 0, "maximum": 1800, "description": "Maximum duration of one agent shell command. 0 means no timeout; Stop always cancels it." }
+        ,"ollamaOffline.contextMessages": { "type": "number", "default": 16, "minimum": 2, "maximum": 80, "description": "Number of recent user/assistant messages sent to the model; the full local history remains stored in the project." }
+        ,"ollamaOffline.accessMode": { "type": "string", "default": "workspace", "enum": ["workspace", "guardedSystem", "fullSystem"], "enumDescriptions": ["Agent can access only the open workspace.", "Agent can inspect the system and work outside the workspace; every write and command remains individually approved and critical paths are blocked.", "Agent can work anywhere accessible to the current Windows user, including local application installs. Every write and command still requires approval; destructive commands remain blocked."], "description": "Filesystem and command access boundary." }
+        ,"ollamaOffline.protectedPaths": { "type": "array", "default": ["C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData", "C:\\Users\\*\\.ssh", "C:\\Users\\*\\AppData\\Roaming\\Code\\User"], "items": { "type": "string" }, "description": "System paths that the agent may inspect but may not write. Use * for one path segment." }
+      }
+    }
+  }
+}

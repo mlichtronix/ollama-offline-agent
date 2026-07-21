@@ -1,0 +1,5 @@
+.ollama-agent/
+*.vsix
+debug.log
+notes.txt
+node_modules/
