@@ -133,6 +133,27 @@ function truncate(value, limit = 14000) {
   const text = String(value ?? '');
   return text.length > limit ? text.slice(0, limit) + `\n[truncated at ${limit} characters]` : text;
 }
+function writePreview(before, after) {
+  const oldLines = String(before || '').split(/\r?\n/); const newLines = String(after || '').split(/\r?\n/); let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
+  let oldEnd = oldLines.length - 1; let newEnd = newLines.length - 1;
+  while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) { oldEnd--; newEnd--; }
+  const body = [`@@ lines ${start + 1} @@`, ...oldLines.slice(start, oldEnd + 1).map(line => `-${line}`), ...newLines.slice(start, newEnd + 1).map(line => `+${line}`)];
+  return truncate(body.join('\n'), 6000);
+}
+async function createCheckpoint(target) {
+  const workspace = root(); const directory = path.join(workspace, '.ollama-agent', 'checkpoints'); const stamp = `${Date.now()}-${path.basename(target).replace(/[^a-z0-9._-]/gi, '_')}`; const snapshot = path.join(directory, stamp);
+  const existed = fs.existsSync(target); await fsp.mkdir(directory, { recursive: true }); if (existed) await fsp.copyFile(target, snapshot);
+  const record = { target, snapshot: existed ? snapshot : null, existed, createdAt: new Date().toISOString() };
+  await fsp.writeFile(path.join(directory, 'last-change.json'), JSON.stringify(record), 'utf8'); return record;
+}
+async function rollbackLastChange() {
+  const workspace = root(); const file = path.join(workspace, '.ollama-agent', 'checkpoints', 'last-change.json'); let record;
+  try { record = JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return 'No rollback checkpoint is available.'; }
+  const answer = await vscode.window.showWarningMessage(`Restore the last agent change to ${record.target}?`, { modal: true }, 'Restore'); if (answer !== 'Restore') return 'User denied rollback.';
+  if (record.existed) await fsp.copyFile(record.snapshot, record.target); else if (fs.existsSync(record.target)) await fsp.unlink(record.target);
+  return `Restored ${record.target}.`;
+}
 function isExplicitFollowUp(task) {
   const text = String(task || '').toLocaleLowerCase('sk').replace(/\s+/g, ' ').trim();
   return /\b(pokračuj|pokračovanie|ďalej|znovu|znova|predchádzajú|predošl|nadviaž|to isté|túto zmenu|tieto zmeny|tú úlohu|tak ich|tak to|oprav to|uprav to|zmeň to|implementuj to|otestuj to|pridaj to)\b/.test(text);
@@ -171,6 +192,7 @@ const tools = [
   { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file. Guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. Requires user approval; protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+  { type: 'function', function: { name: 'rollback_last_change', description: 'Restore the most recent file change made by the agent from a local checkpoint. Requires user approval.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_command', description: 'Run a command. Requires user approval; destructive system commands are blocked. In system access modes cwd can be an absolute path. Full system mode also permits user-accessible local application installers.', parameters: { type: 'object', properties: { command: { type: 'string' }, cwd: { type: 'string' } }, required: ['command'] } } },
   { type: 'function', function: { name: 'git_status', description: 'Read the current Git branch and working-tree status. No changes are made.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'git_diff', description: 'Read uncommitted Git changes, optionally staged changes. No changes are made.', parameters: { type: 'object', properties: { staged: { type: 'boolean' } } } } },
@@ -207,11 +229,14 @@ async function executeTool(call) {
     }
     if (call.function.name === 'write_file') {
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
-      const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}.`, { modal: true }, 'Allow');
+      let before = ''; try { before = await fsp.readFile(target, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      log(`Proposed diff for ${args.path}:\n${writePreview(before, args.content)}`);
+      const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
       if (answer !== 'Allow') return 'User denied file write.';
-      await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8');
-      return `Wrote ${args.path} (${Buffer.byteLength(args.content, 'utf8')} bytes).`;
+      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8');
+      return `Wrote ${args.path} (${Buffer.byteLength(args.content, 'utf8')} bytes). Checkpoint: ${checkpoint.createdAt}.`;
     }
+    if (call.function.name === 'rollback_last_change') return await rollbackLastChange();
     if (call.function.name === 'run_command') {
       const blocked = rejectDangerousCommand(args.command); if (blocked) return blocked;
       const commandCwd = args.cwd ? resolveTarget(args.cwd) : root();

@@ -59,6 +59,8 @@ Attachments are saved under `.ollama-agent/resources/` and are not intended for 
 
 Every file write, command execution, and playbook save requires confirmation. Review each approval carefully, especially in full system mode.
 
+Before an agent file write, the extension records a local checkpoint and writes a concise diff preview to the Output channel. The agent can request restoration of its most recent file change; restoration also requires confirmation.
+
 ## Model Settings
 
 The model menu provides:

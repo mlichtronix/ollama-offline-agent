@@ -22,6 +22,7 @@ jobs:
         run: |
           node --check extension.js
           node --check media/chat.js
+          node --test tests/*.test.js
           Get-Content -Raw -Encoding utf8 package.json | ConvertFrom-Json | Out-Null
       - name: Build VSIX
         shell: pwsh
