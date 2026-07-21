@@ -95,4 +95,6 @@ powershell -ExecutionPolicy Bypass -File .\package-vsix.ps1
 
 ## Privacy and Local Data
 
-The extension uses the configured local Ollama endpoint. Do not change that endpoint to a remote service unless you intentionally want prompts and project context to leave the machine. Remove `.ollama-agent/` to delete the local conversation history and saved attachment copies for a workspace.
+The extension uses `http://127.0.0.1:11434` by default. You can configure an Ollama-compatible HTTP endpoint from the model menu for a server on your LAN or a cloud service. Remote endpoints receive the prompt plus only the project context, tool results, and attachments that the agent selects as relevant for inference. The extension asks for confirmation before using a non-local address.
+
+An optional Bearer token is stored in VS Code Secret Storage, never in the workspace, chat-history file, or `settings.json`. This feature is for Ollama-compatible `/api/*` services; it does not turn arbitrary OpenAI-compatible APIs into Ollama endpoints. Remove `.ollama-agent/` to delete the local conversation history and saved attachment copies for a workspace.

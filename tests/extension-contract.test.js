@@ -24,6 +24,18 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /latestAssistantContext/);
 });
 
+test('remote Ollama configuration keeps credentials out of workspace settings', () => {
+  const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  assert.match(source, /function ollamaFetch/);
+  assert.match(source, /Authorization: `Bearer \$\{endpointToken\}`/);
+  assert.match(source, /context\.secrets\.get\('ollamaEndpointToken'\)/);
+  assert.match(source, /function setEndpoint/);
+  assert.match(source, /Use Remote Endpoint/);
+  assert.match(chatSource, /id="endpoint"/);
+  assert.match(chatSource, /id="endpointToken"/);
+  assert.match(chatSource, /type: 'setEndpoint'/);
+});
+
 test('a recreated chat receives an ordered streaming snapshot', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.match(source, /const activeStreams = new Map\(\)/);
