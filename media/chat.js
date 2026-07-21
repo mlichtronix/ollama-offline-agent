@@ -11,7 +11,12 @@ let sending = false;
 const queuedAttachments = [];
 const uploads = new Map();
 const streamed = new Map();
+const restoredState = vscode.getState() || {};
+let stickToBottom = restoredState.stickToBottom !== false;
+let replyTo;
 const trashSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>';
+const copySvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16V4a2 2 0 0 1 2-2h10"/></svg>';
+const replySvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 17-5-5 5-5"/><path d="M4 12h9a7 7 0 0 1 7 7"/></svg>';
 const shieldSvg = mode => mode === 'guardedSystem' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></svg>' : mode === 'fullSystem' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="M12 8v4M12 16h.01"/></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/></svg>';
 
 function escapeHtml(value) {
@@ -24,6 +29,11 @@ function inlineMarkdown(value) {
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   return html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
 }
+function tableCells(line) {
+  const source = String(line).trim().replace(/^\|/, '').replace(/\|$/, ''); const cells = []; let cell = ''; let inCode = false;
+  for (let index = 0; index < source.length; index++) { const char = source[index]; if (char === '\\' && source[index + 1] === '|') { cell += '|'; index++; continue; } if (char === '`') inCode = !inCode; if (char === '|' && !inCode) { cells.push(cell.trim()); cell = ''; } else cell += char; }
+  cells.push(cell.trim()); return cells;
+}
 function markdown(value) {
   const lines = String(value).replace(/\r/g, '').split('\n');
   const out = []; let inCode = false; let code = []; let list = null;
@@ -32,11 +42,10 @@ function markdown(value) {
     const line = lines[index];
     if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); code = []; } inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
-    const cells = value => value.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
-      closeList(); const headers = cells(line); index += 2; const rows = [];
-      while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(cells(lines[index])); index++; }
-      index--; out.push(`<table><thead><tr>${headers.map(cell => `<th>${inlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cell) => `<td>${inlineMarkdown(row[cell] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`); continue;
+      closeList(); const headers = tableCells(line); const markdownRows = [line, lines[index + 1]]; index += 2; const rows = [];
+      while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(tableCells(lines[index])); markdownRows.push(lines[index]); index++; }
+      index--; out.push(`<div class="table-wrap"><button class="copy-table" title="Copy table as Markdown" data-copy-table="${escapeHtml(markdownRows.join('\n'))}">${copySvg}</button><table><thead><tr>${headers.map(cell => `<th>${inlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cell) => `<td>${inlineMarkdown(row[cell] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.+)$/); const unordered = line.match(/^[-*+]\s+(.+)$/); const ordered = line.match(/^\d+\.\s+(.+)$/);
     if (heading) { closeList(); const level = heading[1].length; out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue; }
@@ -55,15 +64,22 @@ function attachmentMarkup(items, temporary = false) {
   return `<div class="message-attachments${temporary ? ' pending-attachments' : ''}">${markup}</div>`;
 }
 function renderQueuedAttachments() { attachments.innerHTML = attachmentMarkup(queuedAttachments, true); }
-function add(kind, text, id, messageAttachments = []) {
+function formatTime(value) { try { return new Intl.DateTimeFormat(navigator.language, { hour: '2-digit', minute: '2-digit' }).format(new Date(value || Date.now())); } catch { return ''; } }
+function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 28; }
+function persistScroll() { vscode.setState({ stickToBottom, scrollTop: chat.scrollTop }); }
+async function copyText(text) { try { await navigator.clipboard.writeText(text); } catch { const area = document.createElement('textarea'); area.value = text; document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove(); } }
+function renderReplyContext() { const target = document.getElementById('replyContext'); if (!replyTo) { target.replaceChildren(); return; } target.innerHTML = `<span>${replySvg} Replying to: ${escapeHtml(replyTo.quote)}</span><button id="cancelReply" title="Cancel reply">×</button>`; document.getElementById('cancelReply').onclick = () => { replyTo = undefined; renderReplyContext(); }; }
+function selectedExcerpt(element) { const selection = window.getSelection(); if (!selection || selection.isCollapsed || !element.contains(selection.anchorNode) || !element.contains(selection.focusNode)) return ''; return selection.toString().trim().slice(0, 4000); }
+function add(kind, text, id, messageAttachments = [], scroll = true, createdAt, messageReplyTo) {
+  const shouldScroll = scroll && nearBottom();
   let element = id && chat.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
   if (!element) { element = document.createElement('div'); element.className = 'message ' + kind; if (id) element.dataset.messageId = id; chat.appendChild(element); }
   element.className = 'message ' + kind;
-  element.innerHTML = (kind === 'assistant' || kind === 'user') ? markdown(text) : '';
+  element.innerHTML = (kind === 'assistant' || kind === 'user') ? `<time>${formatTime(createdAt)}</time>${messageReplyTo?.quote ? `<blockquote class="reply-reference">${escapeHtml(messageReplyTo.quote)}</blockquote>` : ''}${markdown(text)}` : '';
   if (kind !== 'assistant' && kind !== 'user') element.textContent = text;
   if (kind === 'user') element.insertAdjacentHTML('beforeend', attachmentMarkup(messageAttachments));
-  if (id && (kind === 'assistant' || kind === 'user')) { const remove = document.createElement('button'); remove.className = 'delete-message'; remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); element.appendChild(remove); }
-  element.scrollIntoView({ block: 'end' });
+  if (id && (kind === 'assistant' || kind === 'user')) { const actions = document.createElement('div'); actions.className = 'message-actions'; if (kind === 'assistant') { const copy = document.createElement('button'); copy.title = 'Copy Markdown'; copy.innerHTML = copySvg; copy.onclick = () => copyText(text); const reply = document.createElement('button'); reply.title = 'Reply to this response or selected text'; reply.innerHTML = replySvg; reply.onpointerdown = event => { reply._excerpt = selectedExcerpt(element); event.preventDefault(); }; reply.onclick = () => { replyTo = { id, quote: reply._excerpt || String(text).slice(0, 4000) }; renderReplyContext(); input.focus(); }; actions.append(copy, reply); } const remove = document.createElement('button'); remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); actions.appendChild(remove); element.appendChild(actions); }
+  if (shouldScroll) { element.scrollIntoView({ block: 'end' }); stickToBottom = true; persistScroll(); }
 }
 async function send() {
   const text = input.value.trim(); if (!text || sending) return;
@@ -72,8 +88,8 @@ async function send() {
     await Promise.allSettled([...uploads.values()].map(upload => upload.done));
     const sentAttachments = queuedAttachments.splice(0);
     renderQueuedAttachments();
-    const id = crypto.randomUUID(); add('user', text, id, sentAttachments); input.value = '';
-    vscode.postMessage({ type: 'prompt', text, id, attachments: sentAttachments.map(({ name, mime, path }) => ({ name, mime, path })) });
+    const id = crypto.randomUUID(); add('user', text, id, sentAttachments, true, new Date().toISOString(), replyTo); input.value = '';
+    vscode.postMessage({ type: 'prompt', text, id, replyTo, attachments: sentAttachments.map(({ name, mime, path }) => ({ name, mime, path })) }); replyTo = undefined; renderReplyContext();
   } finally { sending = false; }
 }
 const languageCodes = 'af am ar as az be bg bn bo br bs ca cs cy da de el en eo es et eu fa fi fil fo fr fy ga gd gl gu he hi hr hu hy id is it ja ka kk km kn ko ku ky la lb lo lt lv mg mi mk ml mn mr ms mt my ne nl no oc or pa pl ps pt qu ro ru sa sd si sk sl so sq sr sv sw ta te tg th tk tl tr tt ug uk ur uz vi wo xh yi yo zh zu'.split(' ');
@@ -112,9 +128,11 @@ async function attachFiles(files) {
   }
 }
 resourceInput.addEventListener('change', () => { attachFiles(resourceInput.files); resourceInput.value = ''; });
+chat.addEventListener('scroll', () => { stickToBottom = nearBottom(); persistScroll(); });
+chat.addEventListener('click', event => { const copy = event.target.closest('[data-copy-table]'); if (copy) void copyText(copy.dataset.copyTable || ''); });
 composer.addEventListener('dragover', event => { event.preventDefault(); composer.classList.add('dragging'); });
 composer.addEventListener('dragleave', () => composer.classList.remove('dragging'));
 composer.addEventListener('drop', event => { event.preventDefault(); composer.classList.remove('dragging'); attachFiles(event.dataTransfer.files); });
 input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } });
-window.addEventListener('message', event => { const message = event.data; if (message.type === 'message') { streamed.delete(message.id); add(message.kind, message.text, message.id, message.attachments); } if (message.type === 'assistantDelta') { const next = (streamed.get(message.id) || '') + message.delta; streamed.set(message.id, next); add('assistant', next, message.id); } if (message.type === 'assistantClear') { streamed.delete(message.id); document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)?.remove(); } if (message.type === 'messageDeleted') document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)?.remove(); if (message.type === 'runState') { working = Boolean(message.working); submit.classList.toggle('working', working); submit.title = working ? 'Stop' : 'Send'; } if (message.type === 'settings') renderSettings(message); if (message.type === 'openSettings') toggleMenu(message.menu === 'model' ? 'modelMenu' : 'permissionsMenu'); if (message.type === 'resourceSaved') { const upload = uploads.get(message.clientId); if (upload) { upload.item.path = message.path; uploads.delete(message.clientId); upload.resolve(); } } if (message.type === 'resourceError') { const upload = uploads.get(message.clientId); if (upload) { const index = queuedAttachments.indexOf(upload.item); if (index >= 0) queuedAttachments.splice(index, 1); uploads.delete(message.clientId); upload.resolve(); renderQueuedAttachments(); } add('status', `Attachment error: ${message.message}`); } });
+window.addEventListener('message', event => { const message = event.data; if (message.type === 'historySnapshot') { streamed.clear(); chat.replaceChildren(); for (const item of message.messages || []) add(item.kind, item.text, item.id, item.attachments, false, item.createdAt, item.replyTo); for (const stream of message.streams || []) { streamed.set(stream.id, stream); add('assistant', stream.text, stream.id, [], false, stream.createdAt); } working = Boolean(message.working); submit.classList.toggle('working', working); submit.title = working ? 'Stop' : 'Send'; if (stickToBottom) chat.scrollTop = chat.scrollHeight; else chat.scrollTop = Math.min(Number(restoredState.scrollTop) || 0, chat.scrollHeight); } if (message.type === 'message') { streamed.delete(message.id); add(message.kind, message.text, message.id, message.attachments, true, message.createdAt, message.replyTo); } if (message.type === 'assistantDelta') { const current = streamed.get(message.id) || { text: '', createdAt: message.createdAt }; current.text += message.delta; current.createdAt ||= message.createdAt; streamed.set(message.id, current); add('assistant', current.text, message.id, [], true, current.createdAt); } if (message.type === 'assistantClear') { streamed.delete(message.id); document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)?.remove(); } if (message.type === 'messageDeleted') document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)?.remove(); if (message.type === 'runState') { working = Boolean(message.working); submit.classList.toggle('working', working); submit.title = working ? 'Stop' : 'Send'; } if (message.type === 'settings') renderSettings(message); if (message.type === 'openSettings') toggleMenu(message.menu === 'model' ? 'modelMenu' : 'permissionsMenu'); if (message.type === 'resourceSaved') { const upload = uploads.get(message.clientId); if (upload) { upload.item.path = message.path; uploads.delete(message.clientId); upload.resolve(); } } if (message.type === 'resourceError') { const upload = uploads.get(message.clientId); if (upload) { const index = queuedAttachments.indexOf(upload.item); if (index >= 0) queuedAttachments.splice(index, 1); uploads.delete(message.clientId); upload.resolve(); renderQueuedAttachments(); } add('status', `Attachment error: ${message.message}`); } });
 vscode.postMessage({ type: 'ready' });

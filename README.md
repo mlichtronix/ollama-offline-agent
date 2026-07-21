@@ -85,12 +85,13 @@ powershell -ExecutionPolicy Bypass -File .\package-vsix.ps1
 
 ## Release Process
 
-1. Update the version in `package.json` and `extension.vsixmanifest`.
+`package-vsix.ps1` derives the package patch version from the current Git commit count. Consequently, every committed change produces a newer VSIX identity without manually editing `package.json` or `extension.vsixmanifest`. The script applies the derived version consistently to both files inside the generated archive.
+
+1. Validate the extension in an Extension Development Host.
 2. Build the VSIX with `package-vsix.ps1`.
-3. Validate the extension in an Extension Development Host.
-4. Commit the release changes, create and push tag `v<version>`.
-5. Create a GitHub Release from the tag and upload the generated VSIX as an asset.
-6. Update the release notes with installation instructions and notable changes.
+3. Commit and push the validated change.
+4. Create and push a matching `v<version>` tag when publishing a GitHub Release.
+5. Publish the generated VSIX asset with release notes.
 
 ## Privacy and Local Data
 
