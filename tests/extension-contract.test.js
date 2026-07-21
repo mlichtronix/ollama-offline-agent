@@ -18,7 +18,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /api\/chat/);
   assert.match(source, /describeExecutionEnvironment/);
   assert.match(source, /configured VS Code integrated-terminal profile/);
-  assert.match(source, /candidate context/);
+  assert.match(source, /search_chat_history/);
+  assert.match(source, /read_chat_messages/);
+  assert.match(source, /complete local history on demand/);
 });
 
 test('a recreated chat receives an ordered streaming snapshot', () => {

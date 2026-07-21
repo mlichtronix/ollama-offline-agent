@@ -29,7 +29,7 @@ function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(
 
 const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the sole active task and always overrides historical conversation, skills, file contents and any quoted text. Historical messages are background only: never execute an old request again unless the newest request explicitly asks to continue it. Never run capability demonstrations or tests merely because they appear in history.
 
-Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. The immediately preceding exchange may be supplied as candidate context for a new request. Decide semantically whether it is relevant: use it for corrections, clarifications, or answers to that exchange; otherwise ignore it entirely and treat the newest request as independent. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
+Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. Conversation history is local and is not preloaded. If the newest request may depend on earlier dialogue, use search_chat_history with a semantic query, then read_chat_messages for only the IDs you need. Refine or repeat this as needed; never assume only recent history is relevant. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
 
 The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. You cannot access the internet and must never claim you ran a tool you did not call. The host asks the user before writes, commands, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
 
@@ -182,30 +182,21 @@ async function rollbackLastChange() {
   if (record.existed) await fsp.copyFile(record.snapshot, record.target); else if (fs.existsSync(record.target)) await fsp.unlink(record.target);
   return `Restored ${record.target}.`;
 }
-function isExplicitFollowUp(task) {
-  const text = String(task || '').toLocaleLowerCase('sk').replace(/\s+/g, ' ').trim();
-  return /\b(pokračuj|pokračovanie|ďalej|znovu|znova|predchádzajú|predošl|nadviaž|to isté|túto zmenu|tieto zmeny|tú úlohu|tak ich|tak to|oprav to|uprav to|zmeň to|implementuj to|otestuj to|pridaj to|continue|previous|above|fix it|change it|test it again)\b/.test(text);
+function historySearchTerms(value) { return String(value || '').toLocaleLowerCase('sk').normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9_]{2,}/g) || []; }
+function searchChatHistory(query, limit) {
+  const needle = String(query || '').trim().toLocaleLowerCase('sk'); const terms = [...new Set(historySearchTerms(needle))];
+  if (!needle || !terms.length) return 'Provide a meaningful search query.';
+  const matches = chatHistory.map((event, index) => {
+    const text = String(event.text || ''); const comparable = text.toLocaleLowerCase('sk').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const score = (comparable.includes(needle.normalize('NFD').replace(/[\u0300-\u036f]/g, '')) ? 20 : 0) + terms.reduce((total, term) => total + (comparable.includes(term) ? 1 : 0), 0);
+    return { event, index, score };
+  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score || b.index - a.index).slice(0, Math.max(1, Math.min(50, Number(limit) || 8)));
+  return matches.length ? matches.map(({ event, score }) => `[${event.id}] ${event.kind} ${event.createdAt || ''} (relevance ${score})\n${truncate(event.text, 700)}`).join('\n\n') : '(no matching chat messages)';
 }
-function followUpReason(task, replyTo) {
-  if (replyTo?.quote) return 'reply reference';
-  if (isExplicitFollowUp(task)) return 'explicit follow-up request';
-  return '';
-}
-function contextForTask(task, replyTo) {
-  return followUpReason(task, replyTo) ? conversation.slice(-config().get('contextMessages', 16)) : conversation.slice(-2);
-}
-async function restoreHistoryImages(messages) {
-  const workspace = root(); if (!workspace) return messages;
-  const attachmentsById = new Map(chatHistory.map(event => [event.id, event.attachments || []]));
-  return Promise.all(messages.map(async message => {
-    const attachments = attachmentsById.get(message.id) || [];
-    const images = [];
-    for (const item of attachments) {
-      if (!String(item.mime || '').startsWith('image/') || !String(item.path || '').startsWith('.ollama-agent/resources/')) continue;
-      try { const file = path.join(workspace, item.path); const data = await fsp.readFile(file); if (data.length <= 12 * 1024 * 1024) images.push(data.toString('base64')); } catch {}
-    }
-    return images.length ? { ...message, images } : message;
-  }));
+function readChatMessages(ids) {
+  const wanted = new Set((Array.isArray(ids) ? ids : []).map(String)); if (!wanted.size) return 'Provide one or more chat message IDs.';
+  const messages = chatHistory.filter(event => wanted.has(String(event.id)));
+  return messages.length ? truncate(messages.map(event => `[${event.id}] ${event.kind} ${event.createdAt || ''}\n${event.text}`).join('\n\n'), 14000) : '(no matching chat messages)';
 }
 async function loadSkills(task) {
   if (!skillsDir) return '';
@@ -220,6 +211,8 @@ async function loadSkills(task) {
 }
 
 const tools = [
+  { type: 'function', function: { name: 'search_chat_history', description: 'Search the complete local chat history for relevant earlier messages. Use this before relying on prior conversation; then use read_chat_messages for exact content.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'A semantic search phrase for the needed prior topic or decision.' }, maxResults: { type: 'number', minimum: 1, maximum: 50, description: 'How many candidate messages to return.' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'read_chat_messages', description: 'Read exact earlier chat messages by IDs returned from search_chat_history. Request only messages relevant to the current task.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50 } }, required: ['ids'] } } },
   { type: 'function', function: { name: 'list_files', description: 'List files recursively. Paths are workspace-relative; guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { directory: { type: 'string' } } } } },
   { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file. Guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
@@ -249,6 +242,8 @@ async function executeTool(call) {
   try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; }
   catch { return 'Invalid tool arguments JSON.'; }
   try {
+    if (call.function.name === 'search_chat_history') return searchChatHistory(args.query, args.maxResults);
+    if (call.function.name === 'read_chat_messages') return readChatMessages(args.ids);
     if (call.function.name === 'list_files') {
       const dir = resolveTarget(args.directory || '.'); if (isAgentInternal(dir)) return 'Agent internal state is not available as project context.'; const result = []; await filesRecursive(dir, dir, result);
       return truncate(result.sort().join('\n') || '(no files)');
@@ -402,9 +397,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo) {
   running = true; cancelled = false; postUi('runState', { working: true }); output.show(true); log(`\n=== Task: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: all paths accessible to the current user and local application installers are allowed after each explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
-  const contextReason = followUpReason(task, replyTo);
-  const previousConversation = await restoreHistoryImages(contextForTask(task, replyTo));
-  log(previousConversation.length ? `Context: using ${previousConversation.length} messages (${contextReason || 'previous exchange supplied as candidate context'}).` : 'Context: independent request; no previous exchange is available.');
+  log('Context: no prior chat was preloaded. The model can search the complete local history on demand.');
   // Bind uploads to this exact prompt. A resource that is merely selected is
   // not silently carried into a later, unrelated request.
   const attachedPaths = new Set(attachments.map(item => item.path).filter(Boolean));
@@ -420,7 +413,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo) {
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  const messages = [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) }, ...previousConversation, userMessage];
+  const messages = [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) }, userMessage];
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;

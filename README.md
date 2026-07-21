@@ -45,7 +45,7 @@ Open the **Ollama Agent** view and move it to the Secondary Sidebar if desired. 
 
 ## Usage
 
-The chat stores visible messages locally for the current workspace. A self-contained request is sent without prior conversation context. Requests that explicitly continue prior work, such as “continue”, “fix it”, or “test it again”, include recent relevant history. Historical image attachments are restored for these follow-up requests when available.
+The chat stores visible messages locally for the current workspace. Prior messages are not preloaded into each model request. When earlier discussion is relevant, the agent searches the complete local history and reads only the messages needed for the current task; this avoids both unrelated context and arbitrary recent-message limits.
 
 The agent presents only user-facing messages in chat. Tool calls, command output, and model thinking are written to **View: Output** → **Ollama Offline Agent**.
 
