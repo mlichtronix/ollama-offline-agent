@@ -64,7 +64,9 @@ function attachmentMarkup(items, temporary = false) {
   return `<div class="message-attachments${temporary ? ' pending-attachments' : ''}">${markup}</div>`;
 }
 function renderQueuedAttachments() { attachments.innerHTML = attachmentMarkup(queuedAttachments, true); }
-function formatTime(value) { try { return new Intl.DateTimeFormat(navigator.language, { hour: '2-digit', minute: '2-digit' }).format(new Date(value || Date.now())); } catch { return ''; } }
+function messageDate(value) { return new Date(value || Date.now()); }
+function formatTime(value) { try { return new Intl.DateTimeFormat(navigator.language, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(messageDate(value)); } catch { return ''; } }
+function fullTimestamp(value) { try { return new Intl.DateTimeFormat(navigator.language, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(messageDate(value)); } catch { return ''; } }
 function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 28; }
 function persistScroll() { vscode.setState({ stickToBottom, scrollTop: chat.scrollTop }); }
 async function copyText(text) { try { await navigator.clipboard.writeText(text); } catch { const area = document.createElement('textarea'); area.value = text; document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove(); } }
@@ -75,7 +77,7 @@ function add(kind, text, id, messageAttachments = [], scroll = true, createdAt, 
   let element = id && chat.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
   if (!element) { element = document.createElement('div'); element.className = 'message ' + kind; if (id) element.dataset.messageId = id; chat.appendChild(element); }
   element.className = 'message ' + kind;
-  element.innerHTML = (kind === 'assistant' || kind === 'user') ? `<time>${formatTime(createdAt)}</time>${messageReplyTo?.quote ? `<blockquote class="reply-reference">${escapeHtml(messageReplyTo.quote)}</blockquote>` : ''}${markdown(text)}` : '';
+  element.innerHTML = (kind === 'assistant' || kind === 'user') ? `<time title="${escapeHtml(fullTimestamp(createdAt))}">${formatTime(createdAt)}</time>${messageReplyTo?.quote ? `<blockquote class="reply-reference">${escapeHtml(messageReplyTo.quote)}</blockquote>` : ''}${markdown(text)}` : '';
   if (kind !== 'assistant' && kind !== 'user') element.textContent = text;
   if (kind === 'user') element.insertAdjacentHTML('beforeend', attachmentMarkup(messageAttachments));
   if (id && (kind === 'assistant' || kind === 'user')) { const actions = document.createElement('div'); actions.className = 'message-actions'; if (kind === 'assistant') { const copy = document.createElement('button'); copy.title = 'Copy Markdown'; copy.innerHTML = copySvg; copy.onclick = () => copyText(text); const reply = document.createElement('button'); reply.title = 'Reply to this response or selected text'; reply.innerHTML = replySvg; reply.onpointerdown = event => { reply._excerpt = selectedExcerpt(element); event.preventDefault(); }; reply.onclick = () => { replyTo = { id, quote: reply._excerpt || String(text).slice(0, 4000) }; renderReplyContext(); input.focus(); }; actions.append(copy, reply); } const remove = document.createElement('button'); remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); actions.appendChild(remove); element.appendChild(actions); }
