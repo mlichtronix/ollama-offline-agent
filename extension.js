@@ -30,7 +30,8 @@ The actual built-in capabilities are: listing, reading, searching, and writing f
 
 function log(text) { output.appendLine(text); }
 function postUi(type, data = {}) { if (chatView) void chatView.webview.postMessage({ type, ...data }); }
-function requestStop() { cancelled = true; activeAbortController?.abort(); activeChild?.kill(); }
+function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
+function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
 function saveState() {
   if (!stateFile) return;
   const state = { chatHistory: chatHistory.slice(-200), conversation: conversation.slice(-40) };
@@ -104,9 +105,17 @@ function resolveTarget(input) {
   if (systemAccess()) return candidate;
   const prefix = base.endsWith(path.sep) ? base : base + path.sep;
   if (candidate !== base && !candidate.startsWith(prefix)) throw new Error('Path is outside the workspace.');
+  // Resolve the nearest existing parent to prevent a workspace symlink from
+  // silently redirecting reads or writes outside the workspace.
+  const realBase = fs.realpathSync.native(base); let probe = candidate;
+  while (!fs.existsSync(probe)) { const parent = path.dirname(probe); if (parent === probe) break; probe = parent; }
+  const realProbe = fs.realpathSync.native(probe);
+  const realPrefix = realBase.endsWith(path.sep) ? realBase : realBase + path.sep;
+  if (realProbe !== realBase && !realProbe.startsWith(realPrefix)) throw new Error('Path resolves outside the workspace through a symlink.');
   return candidate;
 }
 function isAgentInternal(target) { const workspace = root(); return Boolean(workspace) && (target === path.join(workspace, '.ollama-agent') || target.startsWith(path.join(workspace, '.ollama-agent') + path.sep)); }
+function isSensitiveTarget(target) { const name = path.basename(target).toLowerCase(); return /^(\.env(?:\..*)?|id_(rsa|ed25519|ecdsa)|known_hosts|authorized_keys|credentials(?:\.json)?|.*\.(pem|pfx|p12|key))$/.test(name); }
 function matchesProtected(target) {
   const normal = path.resolve(target).replace(/\\/g, '/').toLowerCase();
   return config().get('protectedPaths', []).some(pattern => {
@@ -116,7 +125,7 @@ function matchesProtected(target) {
 }
 function rejectDangerousCommand(command) {
   const lower = command.toLowerCase();
-  if (/(?:\bformat\b|\bdiskpart\b|\breg\s+delete\b|\bshutdown\b|\bstop-computer\b|\brestart-computer\b|\bremove-item\b[^\n]*-recurse|\brmdir\b[^\n]*\/s|\bdel\b[^\n]*\/s)/.test(lower)) return 'Blocked by guardrail: destructive system command.';
+  if (/(?:\bformat\b|\bdiskpart\b|\bclear-disk\b|\breg\s+delete\b|\bshutdown\b|\bstop-computer\b|\brestart-computer\b|\bremove-item\b[^\n]*-recurse|\brmdir\b[^\n]*\/s|\bdel\b[^\n]*\/s|\bencodedcommand\b|\binvoke-expression\b|\biex\s*\()/i.test(lower)) return 'Blocked by guardrail: destructive or obfuscated system command.';
   if (!fullSystem() && config().get('protectedPaths', []).some(p => lower.includes(String(p).replace('*', '').toLowerCase()))) return 'Blocked by guardrail: command references a protected path.';
   return null;
 }
@@ -175,6 +184,7 @@ async function filesRecursive(dir, base, result) {
   for (const item of entries) {
     if (ignored.has(item.name)) continue;
     const full = path.join(dir, item.name);
+    if (isSensitiveTarget(full)) continue;
     if (item.isDirectory()) await filesRecursive(full, base, result);
     else if (item.isFile()) result.push(path.relative(base, full));
     if (result.length >= 500) return;
@@ -189,14 +199,14 @@ async function executeTool(call) {
       const dir = resolveTarget(args.directory || '.'); if (isAgentInternal(dir)) return 'Agent internal state is not available as project context.'; const result = []; await filesRecursive(dir, dir, result);
       return truncate(result.sort().join('\n') || '(no files)');
     }
-    if (call.function.name === 'read_file') { const target = resolveTarget(args.path); if (isAgentInternal(target)) return 'Agent internal state is not available as project context.'; return truncate(await fsp.readFile(target, 'utf8')); }
+    if (call.function.name === 'read_file') { const target = resolveTarget(args.path); if (isAgentInternal(target)) return 'Agent internal state is not available as project context.'; if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual inspection outside the agent.'; return truncate(await fsp.readFile(target, 'utf8')); }
     if (call.function.name === 'search_text') {
-      const base = resolveTarget(args.directory || '.'); if (isAgentInternal(base)) return 'Agent internal state is not available as project context.'; const files = []; await filesRecursive(base, base, files); const hits = [];
+      const base = resolveTarget(args.directory || '.'); if (isAgentInternal(base)) return 'Agent internal state is not available as project context.'; if (isSensitiveTarget(base)) return 'Blocked by guardrail: sensitive file requires manual inspection outside the agent.'; const files = []; await filesRecursive(base, base, files); const hits = [];
       for (const relative of files) { try { const lines = (await fsp.readFile(path.join(base, relative), 'utf8')).split(/\r?\n/); lines.forEach((line, i) => { if (line.includes(args.query) && hits.length < 100) hits.push(`${relative}:${i + 1}: ${line}`); }); } catch {} }
       return truncate(hits.join('\n') || '(no matches)');
     }
     if (call.function.name === 'write_file') {
-      const target = resolveTarget(args.path); if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
+      const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
       const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}.`, { modal: true }, 'Allow');
       if (answer !== 'Allow') return 'User denied file write.';
       await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8');
@@ -204,7 +214,8 @@ async function executeTool(call) {
     }
     if (call.function.name === 'run_command') {
       const blocked = rejectDangerousCommand(args.command); if (blocked) return blocked;
-      const answer = await vscode.window.showWarningMessage(`Agent wants to run:\n${args.command}`, { modal: true }, 'Allow');
+      const commandCwd = args.cwd ? resolveTarget(args.cwd) : root();
+      const answer = await vscode.window.showWarningMessage(`Agent wants to run in ${commandCwd}:\n${args.command}`, { modal: true }, 'Allow');
       if (answer !== 'Allow') return 'User denied command execution.';
       return await runCommand(args.command, args.cwd);
     }
@@ -234,7 +245,7 @@ function runCommand(command, requestedCwd) {
       resolve(truncate(`${status}\nSTDOUT:\n${stdout || ''}\nSTDERR:\n${stderr || ''}`));
     });
     activeChild = child;
-    if (cancelled) child.kill();
+    if (cancelled) stopProcessTree(child);
   });
 }
 async function chat(messages, onChunk) {
@@ -427,7 +438,8 @@ async function setAccessMode(value) {
 }
 function selectAccessMode() { postUi('openSettings', { menu: 'permissions' }); }
 async function setLanguage(language) { await config().update('language', String(language || 'auto'), vscode.ConfigurationTarget.Global); await publishSettings(); }
-async function setGenerationSettings(temperature, contextWindow) { await config().update('temperature', Math.max(0, Math.min(2, Number(temperature))), vscode.ConfigurationTarget.Global); await config().update('contextWindow', Math.max(0, Math.min(262144, Number(contextWindow) || 0)), vscode.ConfigurationTarget.Global); await publishSettings(); }
+async function modelContextLimit(model) { try { const response = await fetch(config().get('endpoint').replace(/\/$/, '') + '/api/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) }); if (!response.ok) return 0; const data = await response.json(); const values = Object.entries(data.model_info || {}).filter(([key]) => /context_length$/i.test(key)).map(([, value]) => Number(value)).filter(Number.isFinite); return values.length ? Math.max(...values) : 0; } catch { return 0; } }
+async function setGenerationSettings(temperature, contextWindow) { const requested = Math.max(0, Math.min(262144, Number(contextWindow) || 0)); const limit = requested ? await modelContextLimit(await configuredModel()) : 0; if (limit && requested > limit) return vscode.window.showWarningMessage(`Selected model supports at most ${limit} context tokens.`); await config().update('temperature', Math.max(0, Math.min(2, Number(temperature))), vscode.ConfigurationTarget.Global); await config().update('contextWindow', requested, vscode.ConfigurationTarget.Global); await publishSettings(); }
 async function pullModel(name) {
   const model = String(name || '').trim();
   if (!model || /\s/.test(model) || model.length > 180) return vscode.window.showErrorMessage('Enter a valid Ollama model name, for example qwen3.6:27b.');
