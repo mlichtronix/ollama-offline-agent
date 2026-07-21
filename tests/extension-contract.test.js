@@ -50,7 +50,13 @@ test('about exposes the installed extension version', () => {
   assert.match(source, /function showAbout/);
   assert.match(source, /context\.extension\?\.packageJSON\?\.version/);
   assert.match(source, /ollamaOffline\.about/);
-  assert.match(source, /renderHtmlV3\(webview\)[\s\S]*const info =[\s\S]*\$\{info\}/);
+  const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  assert.match(chatSource, /aboutPanel/);
+});
+
+test('clearing chat history remains explicit and confirmed', () => {
+  assert.match(source, /Clear this workspace chat history/);
+  assert.match(source, /Clear Chat History/);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {

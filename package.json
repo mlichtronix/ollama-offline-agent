@@ -26,8 +26,8 @@
       { "command": "ollamaOffline.health", "title": "Ollama Offline Agent: Check Local Ollama" },
       { "command": "ollamaOffline.selectModel", "title": "Ollama Offline Agent: Select Installed Model", "icon": { "light": "media/icons/brain-light.svg", "dark": "media/icons/brain-dark.svg" } },
       { "command": "ollamaOffline.openSkills", "title": "Ollama Offline Agent: Open Local Skills Folder" },
-      { "command": "ollamaOffline.newChat", "title": "Ollama Offline Agent: Start New Chat", "icon": { "light": "media/icons/plus-light.svg", "dark": "media/icons/plus-dark.svg" } },
-      { "command": "ollamaOffline.about", "title": "Ollama Offline Agent: About" },
+      { "command": "ollamaOffline.newChat", "title": "Ollama Offline Agent: Clear Chat History", "icon": { "light": "media/icons/trash-light.svg", "dark": "media/icons/trash-dark.svg" } },
+      { "command": "ollamaOffline.about", "title": "Ollama Offline Agent: About", "icon": { "light": "media/icons/info-light.svg", "dark": "media/icons/info-dark.svg" } },
       { "command": "ollamaOffline.openChatEditor", "title": "Ollama Offline Agent: Open Chat in Editor" }
       ,{ "command": "ollamaOffline.moveChatToSecondarySidebar", "title": "Ollama Offline Agent: Open in Secondary Side Bar…" }
     ],
@@ -44,7 +44,8 @@
     "menus": {
       "view/title": [
         { "command": "ollamaOffline.newChat", "when": "view == ollamaOffline.chat", "group": "navigation@1" },
-        { "command": "ollamaOffline.selectModel", "when": "view == ollamaOffline.chat", "group": "navigation@2" }
+        { "command": "ollamaOffline.selectModel", "when": "view == ollamaOffline.chat", "group": "navigation@2" },
+        { "command": "ollamaOffline.about", "when": "view == ollamaOffline.chat", "group": "navigation@3" }
       ]
     },
     "configuration": {
