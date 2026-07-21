@@ -61,6 +61,12 @@ test('clearing chat history remains explicit and confirmed', () => {
   assert.match(source, /Clear Chat History/);
 });
 
+test('webview controls do not reference removed header actions', () => {
+  const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  assert.doesNotMatch(chatSource, /getElementById\('new'\)/);
+  assert.match(chatSource, /mode-\$\{value\}/);
+});
+
 test('the package script derives a unique VSIX version from Git history', () => {
   const packageScript = fs.readFileSync(path.join(__dirname, '..', 'package-vsix.ps1'), 'utf8');
   assert.match(packageScript, /git -C \$root rev-list --count HEAD/);
