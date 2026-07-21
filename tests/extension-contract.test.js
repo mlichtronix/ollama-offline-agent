@@ -37,6 +37,7 @@ test('a recreated chat receives an ordered streaming snapshot', () => {
 
 test('chat rendering preserves inline-code table pipes and exposes copy/reply actions', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  const chatStyles = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8');
   assert.match(chatSource, /function tableCells/);
   assert.match(chatSource, /data-copy-table/);
   assert.match(chatSource, /copySvg/);
@@ -44,6 +45,7 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /selectedExcerpt/);
   assert.match(chatSource, /getFullYear\(\).*getMonth\(\).*getSeconds\(\)/s);
   assert.match(chatSource, /renderAbout/);
+  assert.match(chatStyles, /\.composer-actions\s*\{\s*display:\s*flex/);
 });
 
 test('about exposes the installed extension version', () => {
