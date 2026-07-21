@@ -26,7 +26,7 @@ const SYSTEM = `You are an offline coding agent operating through a VS Code exte
 
 Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
 
-The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. You cannot access the internet and must never claim you ran a tool you did not call. The host asks the user before writes, commands, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
+The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. You cannot access the internet and must never claim you ran a tool you did not call. The host asks the user before writes, commands, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
 
 function log(text) { output.appendLine(text); }
 function postUi(type, data = {}) { if (chatView) void chatView.webview.postMessage({ type, ...data }); }
@@ -244,9 +244,9 @@ async function executeTool(call) {
       if (answer !== 'Allow') return 'User denied command execution.';
       return await runCommand(args.command, args.cwd);
     }
-    if (call.function.name === 'git_status') return await runCommand('git status --short --branch');
-    if (call.function.name === 'git_diff') return await runCommand(args.staged ? 'git diff --staged' : 'git diff');
-    if (call.function.name === 'git_log') return await runCommand(`git log --oneline -n ${Math.max(1, Math.min(50, Number(args.count) || 15))}`);
+    if (call.function.name === 'git_status') { if (!await isGitRepository()) return 'This workspace is not a Git repository. Continue without Git.'; return await runCommand('git status --short --branch'); }
+    if (call.function.name === 'git_diff') { if (!await isGitRepository()) return 'This workspace is not a Git repository. Continue without Git.'; return await runCommand(args.staged ? 'git diff --staged' : 'git diff'); }
+    if (call.function.name === 'git_log') { if (!await isGitRepository()) return 'This workspace is not a Git repository. Continue without Git.'; return await runCommand(`git log --oneline -n ${Math.max(1, Math.min(50, Number(args.count) || 15))}`); }
     if (call.function.name === 'save_skill') {
       const name = String(args.name).replace(/[^a-z0-9_-]/gi, '-').replace(/^-+|-+$/g, '').slice(0, 80);
       if (!name) return 'Skill name must contain letters or numbers.';
@@ -273,6 +273,7 @@ function runCommand(command, requestedCwd) {
     if (cancelled) stopProcessTree(child);
   });
 }
+function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
 async function chat(messages, onChunk) {
   const endpoint = config().get('endpoint').replace(/\/$/, '');
   const controller = new AbortController(); activeAbortController = controller;

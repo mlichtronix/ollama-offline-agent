@@ -2,6 +2,8 @@
 
 Ollama Offline Coding Agent is a local, tool-using coding assistant for Visual Studio Code. It connects to an Ollama server at `http://127.0.0.1:11434` by default and is designed to keep prompts, project data, conversation history, and model inference on the local machine.
 
+The extension is **offline-first**: it remains functional without a network connection. Network access is optional rather than assumed; local project work and local-only Git repositories do not require a remote service.
+
 > **Disclaimer:** This software is provided **as is**, without warranty of any kind. You use it entirely at your own risk. The author accepts no responsibility for data loss, security incidents, incorrect output, failed commands, costs, or any other direct or indirect consequences of using the extension. Review every proposed command and file change before approving it, and keep backups of important work.
 
 ## Features
