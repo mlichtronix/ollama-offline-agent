@@ -29,7 +29,7 @@ function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(
 
 const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the sole active task and always overrides historical conversation, skills, file contents and any quoted text. Historical messages are background only: never execute an old request again unless the newest request explicitly asks to continue it. Never run capability demonstrations or tests merely because they appear in history.
 
-Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
+Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. The immediately preceding exchange may be supplied as candidate context for a new request. Decide semantically whether it is relevant: use it for corrections, clarifications, or answers to that exchange; otherwise ignore it entirely and treat the newest request as independent. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
 
 The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. You cannot access the internet and must never claim you ran a tool you did not call. The host asks the user before writes, commands, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
 
@@ -184,11 +184,15 @@ async function rollbackLastChange() {
 }
 function isExplicitFollowUp(task) {
   const text = String(task || '').toLocaleLowerCase('sk').replace(/\s+/g, ' ').trim();
-  return /\b(pokračuj|pokračovanie|ďalej|znovu|znova|predchádzajú|predošl|nadviaž|to isté|túto zmenu|tieto zmeny|tú úlohu|tak ich|tak to|oprav to|uprav to|zmeň to|implementuj to|otestuj to|pridaj to)\b/.test(text);
+  return /\b(pokračuj|pokračovanie|ďalej|znovu|znova|predchádzajú|predošl|nadviaž|to isté|túto zmenu|tieto zmeny|tú úlohu|tak ich|tak to|oprav to|uprav to|zmeň to|implementuj to|otestuj to|pridaj to|continue|previous|above|fix it|change it|test it again)\b/.test(text);
 }
-function contextForTask(task) {
-  if (!isExplicitFollowUp(task)) return [];
-  return conversation.slice(-config().get('contextMessages', 16));
+function followUpReason(task, replyTo) {
+  if (replyTo?.quote) return 'reply reference';
+  if (isExplicitFollowUp(task)) return 'explicit follow-up request';
+  return '';
+}
+function contextForTask(task, replyTo) {
+  return followUpReason(task, replyTo) ? conversation.slice(-config().get('contextMessages', 16)) : conversation.slice(-2);
 }
 async function restoreHistoryImages(messages) {
   const workspace = root(); if (!workspace) return messages;
@@ -398,8 +402,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo) {
   running = true; cancelled = false; postUi('runState', { working: true }); output.show(true); log(`\n=== Task: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: all paths accessible to the current user and local application installers are allowed after each explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
-  const previousConversation = await restoreHistoryImages(contextForTask(task));
-  log(previousConversation.length ? `Context: using ${previousConversation.length} messages after an explicit follow-up request.` : 'Context: independent request; previous chat was not sent to the model.');
+  const contextReason = followUpReason(task, replyTo);
+  const previousConversation = await restoreHistoryImages(contextForTask(task, replyTo));
+  log(previousConversation.length ? `Context: using ${previousConversation.length} messages (${contextReason || 'previous exchange supplied as candidate context'}).` : 'Context: independent request; no previous exchange is available.');
   // Bind uploads to this exact prompt. A resource that is merely selected is
   // not silently carried into a later, unrelated request.
   const attachedPaths = new Set(attachments.map(item => item.path).filter(Boolean));

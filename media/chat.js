@@ -65,8 +65,9 @@ function attachmentMarkup(items, temporary = false) {
 }
 function renderQueuedAttachments() { attachments.innerHTML = attachmentMarkup(queuedAttachments, true); }
 function messageDate(value) { return new Date(value || Date.now()); }
-function formatTime(value) { try { return new Intl.DateTimeFormat(navigator.language, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(messageDate(value)); } catch { return ''; } }
-function fullTimestamp(value) { try { return new Intl.DateTimeFormat(navigator.language, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(messageDate(value)); } catch { return ''; } }
+function timestampPart(value) { return String(value).padStart(2, '0'); }
+function formatTime(value) { const date = messageDate(value); return `${date.getFullYear()}-${timestampPart(date.getMonth() + 1)}-${timestampPart(date.getDate())} ${timestampPart(date.getHours())}:${timestampPart(date.getMinutes())}:${timestampPart(date.getSeconds())}`; }
+function fullTimestamp(value) { return formatTime(value); }
 function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 28; }
 function persistScroll() { vscode.setState({ stickToBottom, scrollTop: chat.scrollTop }); }
 async function copyText(text) { try { await navigator.clipboard.writeText(text); } catch { const area = document.createElement('textarea'); area.value = text; document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove(); } }

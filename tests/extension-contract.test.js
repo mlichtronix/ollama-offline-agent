@@ -18,6 +18,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /api\/chat/);
   assert.match(source, /describeExecutionEnvironment/);
   assert.match(source, /configured VS Code integrated-terminal profile/);
+  assert.match(source, /candidate context/);
 });
 
 test('a recreated chat receives an ordered streaming snapshot', () => {
@@ -38,6 +39,7 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /copySvg/);
   assert.match(chatSource, /replySvg/);
   assert.match(chatSource, /selectedExcerpt/);
+  assert.match(chatSource, /getFullYear\(\).*getMonth\(\).*getSeconds\(\)/s);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {
