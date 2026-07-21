@@ -21,6 +21,7 @@ const pendingResources = [];
 let activeAbortController;
 let activeChild;
 let environmentDescription;
+let extensionVersion = 'unknown';
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
 // the exact in-progress reply after the persisted conversation.
@@ -501,6 +502,7 @@ async function setAccessMode(value) {
   await config().update('accessMode', value, vscode.ConfigurationTarget.Global); await publishSettings();
 }
 function selectAccessMode() { postUi('openSettings', { menu: 'permissions' }); }
+function showAbout() { postUi('about', { version: extensionVersion, historyPath: root() ? '.ollama-agent/chat-history.json' : 'Open a workspace to create local history.' }); }
 async function setLanguage(language) { await config().update('language', String(language || 'auto'), vscode.ConfigurationTarget.Global); await publishSettings(); }
 async function modelContextLimit(model) { try { const response = await fetch(config().get('endpoint').replace(/\/$/, '') + '/api/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) }); if (!response.ok) return 0; const data = await response.json(); const values = Object.entries(data.model_info || {}).filter(([key]) => /context_length$/i.test(key)).map(([, value]) => Number(value)).filter(Number.isFinite); return values.length ? Math.max(...values) : 0; } catch { return 0; } }
 async function setGenerationSettings(temperature, contextWindow) { const requested = Math.max(0, Math.min(262144, Number(contextWindow) || 0)); const limit = requested ? await modelContextLimit(await configuredModel()) : 0; if (limit && requested > limit) return vscode.window.showWarningMessage(`Selected model supports at most ${limit} context tokens.`); await config().update('temperature', Math.max(0, Math.min(2, Number(temperature))), vscode.ConfigurationTarget.Global); await config().update('contextWindow', requested, vscode.ConfigurationTarget.Global); await publishSettings(); }
@@ -558,6 +560,7 @@ class OfflineChatViewProvider {
       if (message.type === 'stop') requestStop();
       if (message.type === 'model') selectModel();
       if (message.type === 'newChat') newChat();
+      if (message.type === 'about') showAbout();
       if (message.type === 'permissions') selectAccessMode();
       if (message.type === 'setModel') setModel(String(message.model || ''));
       if (message.type === 'setAccessMode') setAccessMode(String(message.mode || ''));
@@ -596,6 +599,7 @@ class OfflineChatViewProvider {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
     const brain = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a3 3 0 0 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 1.842 7.192A4 4 0 0 0 12 20Z"/><path d="M12 5a3 3 0 0 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-1.842 7.192A4 4 0 0 1 12 20Z"/><path d="M12 5v15"/></svg>';
+    const info = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>';
     const arrow = '<svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>';
     const square = '<svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="10" height="10" x="7" y="7" rx="1"/></svg>';
     const shield = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/></svg>';
@@ -613,7 +617,7 @@ class OfflineChatViewProvider {
     const initialModel = config().get('model');
     const initialModeLabel = ({ workspace: 'Workspace access', guardedSystem: 'Guarded system access', fullSystem: 'Full system access' })[initialMode] || 'Permissions';
     const initialShield = initialMode === 'guardedSystem' ? '<svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></svg>' : initialMode === 'fullSystem' ? '<svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="M12 8v4M12 16h.01"/></svg>' : shield;
-    return `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; img-src ${webview.cspSource} data:;"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link rel="stylesheet" href="${styleUri}"></head><body><header class="chat-header"><div><strong>Ollama Agent</strong><span>Local project chat</span></div><div class="header-actions"><button id="new" title="New chat">＋</button></div></header><main id="chat" aria-live="polite"><div class="status">Ready</div></main><section class="composer" id="composer"><div id="composerResize" title="Drag to resize prompt"></div><div id="replyContext" class="reply-context"></div><div id="attachments" class="attachments"></div><textarea id="input" placeholder="Ask the agent to inspect, plan, code, or test…" aria-label="Agent prompt"></textarea><input id="resourceInput" type="file" multiple hidden><div class="composer-actions"><div class="setting"><button class="permissions icon-only mode-${initialMode}" id="permissions" title="${initialModeLabel}">${initialShield}</button><div id="permissionsMenu" class="setting-menu"></div></div><div class="setting"><button class="model icon-only" id="model" title="Model: ${initialModel}">${brain}</button><div id="modelMenu" class="setting-menu model-menu"></div></div><button class="attach icon-only" id="attach" title="Attach files or images">${clip}</button><span>Drop files · Enter to send</span><div class="setting"><button id="language" class="language" title="Reply language">SK</button><div id="languageMenu" class="setting-menu language-menu"></div></div><button id="submit" class="submit" title="Send">${arrow}${square}</button></div></section><script src="${scriptUri}"></script></body></html>`;
+    return `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; img-src ${webview.cspSource} data:;"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link rel="stylesheet" href="${styleUri}"></head><body><header class="chat-header"><div><strong>Ollama Agent</strong><span>Local project chat</span></div><div class="header-actions"><div class="setting"><button id="about" class="icon-only" title="About Ollama Agent">${info}</button><div id="aboutMenu" class="setting-menu about-menu"></div></div><button id="new" title="New chat">＋</button></div></header><main id="chat" aria-live="polite"><div class="status">Ready</div></main><section class="composer" id="composer"><div id="composerResize" title="Drag to resize prompt"></div><div id="replyContext" class="reply-context"></div><div id="attachments" class="attachments"></div><textarea id="input" placeholder="Ask the agent to inspect, plan, code, or test…" aria-label="Agent prompt"></textarea><input id="resourceInput" type="file" multiple hidden><div class="composer-actions"><div class="setting"><button class="permissions icon-only mode-${initialMode}" id="permissions" title="${initialModeLabel}">${initialShield}</button><div id="permissionsMenu" class="setting-menu"></div></div><div class="setting"><button class="model icon-only" id="model" title="Model: ${initialModel}">${brain}</button><div id="modelMenu" class="setting-menu model-menu"></div></div><button class="attach icon-only" id="attach" title="Attach files or images">${clip}</button><span>Drop files · Enter to send</span><div class="setting"><button id="language" class="language" title="Reply language">SK</button><div id="languageMenu" class="setting-menu language-menu"></div></div><button id="submit" class="submit" title="Send">${arrow}${square}</button></div></section><script src="${scriptUri}"></script></body></html>`;
   }
   renderHtml(webview) {
     return this.renderHtmlV2(webview);
@@ -630,11 +634,12 @@ class OfflineChatViewProvider {
   }
 }
 function activate(context) {
+  extensionVersion = context.extension?.packageJSON?.version || 'unknown';
   output = vscode.window.createOutputChannel('Ollama Offline Agent');
   skillsDir = path.join(context.globalStorageUri.fsPath, 'skills');
   chatProvider = new OfflineChatViewProvider(context);
   if (root()) void ensureWorkspaceState();
-  context.subscriptions.push(output, vscode.workspace.onDidChangeWorkspaceFolders(() => { if (root()) void ensureWorkspaceState(); }), vscode.window.registerWebviewViewProvider('ollamaOffline.chat', chatProvider), vscode.commands.registerCommand('ollamaOffline.ask', ask), vscode.commands.registerCommand('ollamaOffline.stop', () => { requestStop(); vscode.window.showInformationMessage('Stop requested.'); }), vscode.commands.registerCommand('ollamaOffline.health', health), vscode.commands.registerCommand('ollamaOffline.selectModel', selectModel), vscode.commands.registerCommand('ollamaOffline.openSkills', openSkills), vscode.commands.registerCommand('ollamaOffline.newChat', newChat), vscode.commands.registerCommand('ollamaOffline.openChatEditor', openChatEditor), vscode.commands.registerCommand('ollamaOffline.moveChatToSecondarySidebar', moveChatToSecondarySidebar));
+  context.subscriptions.push(output, vscode.workspace.onDidChangeWorkspaceFolders(() => { if (root()) void ensureWorkspaceState(); }), vscode.window.registerWebviewViewProvider('ollamaOffline.chat', chatProvider), vscode.commands.registerCommand('ollamaOffline.ask', ask), vscode.commands.registerCommand('ollamaOffline.stop', () => { requestStop(); vscode.window.showInformationMessage('Stop requested.'); }), vscode.commands.registerCommand('ollamaOffline.health', health), vscode.commands.registerCommand('ollamaOffline.selectModel', selectModel), vscode.commands.registerCommand('ollamaOffline.openSkills', openSkills), vscode.commands.registerCommand('ollamaOffline.newChat', newChat), vscode.commands.registerCommand('ollamaOffline.about', showAbout), vscode.commands.registerCommand('ollamaOffline.openChatEditor', openChatEditor), vscode.commands.registerCommand('ollamaOffline.moveChatToSecondarySidebar', moveChatToSecondarySidebar));
 }
 function deactivate() { requestStop(); }
 module.exports = { activate, deactivate };

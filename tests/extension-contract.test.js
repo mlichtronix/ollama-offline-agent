@@ -43,6 +43,13 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /replySvg/);
   assert.match(chatSource, /selectedExcerpt/);
   assert.match(chatSource, /getFullYear\(\).*getMonth\(\).*getSeconds\(\)/s);
+  assert.match(chatSource, /renderAbout/);
+});
+
+test('about exposes the installed extension version', () => {
+  assert.match(source, /function showAbout/);
+  assert.match(source, /context\.extension\?\.packageJSON\?\.version/);
+  assert.match(source, /ollamaOffline\.about/);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {
