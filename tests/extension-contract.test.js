@@ -59,6 +59,7 @@ test('about exposes the installed extension version', () => {
 test('clearing chat history remains explicit and confirmed', () => {
   assert.match(source, /Clear this workspace chat history/);
   assert.match(source, /Clear Chat History/);
+  assert.match(source, /postUi\('historyCleared'\)/);
 });
 
 test('webview controls do not reference removed header actions', () => {

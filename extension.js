@@ -17,6 +17,7 @@ const conversation = [];
 let stateFile;
 let chatProvider;
 let stateReady = Promise.resolve();
+let stateWrite = Promise.resolve();
 const pendingResources = [];
 let activeAbortController;
 let activeChild;
@@ -43,9 +44,11 @@ function postUi(type, data = {}) {
 function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
 function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
 function saveState() {
-  if (!stateFile) return;
+  if (!stateFile) return Promise.resolve();
   const state = { chatHistory: chatHistory.slice(-200), conversation: conversation.slice(-40) };
-  void fsp.mkdir(path.dirname(stateFile), { recursive: true }).then(() => fsp.writeFile(stateFile, JSON.stringify(state), 'utf8')).catch(error => log(`Could not save chat state: ${error.message}`));
+  const target = stateFile;
+  stateWrite = stateWrite.catch(() => undefined).then(() => fsp.mkdir(path.dirname(target), { recursive: true })).then(() => fsp.writeFile(target, JSON.stringify(state), 'utf8')).catch(error => log(`Could not save chat state: ${error.message}`));
+  return stateWrite;
 }
 async function ensureWorkspaceState() {
   const workspace = root();
@@ -526,8 +529,8 @@ async function newChat() {
   if (running) return vscode.window.showWarningMessage('Stop the current agent run before starting a new chat.');
   const confirmed = await vscode.window.showWarningMessage('Clear this workspace chat history? This removes the visible conversation and its local context.', { modal: true }, 'Clear Chat History');
   if (confirmed !== 'Clear Chat History') return;
-  chatHistory.length = 0; conversation.length = 0; pendingResources.length = 0; saveState();
-  if (chatView) chatProvider.setup(chatView);
+  chatHistory.length = 0; conversation.length = 0; pendingResources.length = 0; await saveState();
+  postUi('historyCleared');
 }
 function openChatEditor() { chatProvider.openInEditor(); }
 async function moveChatToSecondarySidebar() {

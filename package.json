@@ -44,8 +44,7 @@
     "menus": {
       "view/title": [
         { "command": "ollamaOffline.newChat", "when": "view == ollamaOffline.chat", "group": "navigation@1" },
-        { "command": "ollamaOffline.selectModel", "when": "view == ollamaOffline.chat", "group": "navigation@2" },
-        { "command": "ollamaOffline.about", "when": "view == ollamaOffline.chat", "group": "navigation@3" }
+        { "command": "ollamaOffline.about", "when": "view == ollamaOffline.chat", "group": "navigation@2" }
       ]
     },
     "configuration": {
