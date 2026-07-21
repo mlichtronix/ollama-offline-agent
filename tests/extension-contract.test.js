@@ -50,6 +50,7 @@ test('about exposes the installed extension version', () => {
   assert.match(source, /function showAbout/);
   assert.match(source, /context\.extension\?\.packageJSON\?\.version/);
   assert.match(source, /ollamaOffline\.about/);
+  assert.match(source, /renderHtmlV3\(webview\)[\s\S]*const info =[\s\S]*\$\{info\}/);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {
