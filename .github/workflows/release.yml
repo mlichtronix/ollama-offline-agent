@@ -13,8 +13,8 @@ jobs:
   package:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Validate extension sources
@@ -22,7 +22,7 @@ jobs:
         run: |
           node --check extension.js
           node --check media/chat.js
-          node --test tests/*.test.js
+          node --test (Get-ChildItem -Path tests -Filter '*.test.js' | Select-Object -ExpandProperty FullName)
           Get-Content -Raw -Encoding utf8 package.json | ConvertFrom-Json | Out-Null
       - name: Build VSIX
         shell: pwsh
