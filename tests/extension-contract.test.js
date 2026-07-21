@@ -44,4 +44,5 @@ test('the package script derives a unique VSIX version from Git history', () => 
   const packageScript = fs.readFileSync(path.join(__dirname, '..', 'package-vsix.ps1'), 'utf8');
   assert.match(packageScript, /git -C \$root rev-list --count HEAD/);
   assert.match(packageScript, /ollama-offline-agent-\$version\.vsix/);
+  assert.match(packageScript, /UTF8Encoding\(\$false\)/);
 });

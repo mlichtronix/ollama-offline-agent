@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packageSource = Get-Content -Raw -Encoding utf8 (Join-Path $root 'package.json') | ConvertFrom-Json
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $parts = @($packageSource.version -split '\.')
 $revision = 0
 try { $revision = [int](& git -C $root rev-list --count HEAD 2>$null) } catch {}
@@ -13,12 +14,12 @@ New-Item -ItemType Directory -Path $extension -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'package.json'), (Join-Path $root 'extension.js'), (Join-Path $root 'README.md'), (Join-Path $root 'extension.vsixmanifest'), (Join-Path $root '[Content_Types].xml') -Destination $extension
 Copy-Item -LiteralPath (Join-Path $root 'media') -Destination $extension -Recurse
 $packageSource.version = $version
-$packageSource | ConvertTo-Json -Depth 32 | Set-Content -Encoding utf8 (Join-Path $extension 'package.json')
+[System.IO.File]::WriteAllText((Join-Path $extension 'package.json'), ($packageSource | ConvertTo-Json -Depth 32), $utf8NoBom)
 # VS Code expects these two files in the VSIX archive root, not in extension/.
 Move-Item -LiteralPath (Join-Path $extension 'extension.vsixmanifest') -Destination (Join-Path $stage 'extension.vsixmanifest')
 Move-Item -LiteralPath (Join-Path $extension '[Content_Types].xml') -Destination (Join-Path $stage '[Content_Types].xml')
 $manifest = Join-Path $stage 'extension.vsixmanifest'
-(Get-Content -Raw -Encoding utf8 $manifest) -replace 'Version="[^"]+" Publisher=', ('Version="{0}" Publisher=' -f $version) | Set-Content -Encoding utf8 $manifest
+[System.IO.File]::WriteAllText($manifest, ((Get-Content -Raw -Encoding utf8 $manifest) -replace 'Version="[^"]+" Publisher=', ('Version="{0}" Publisher=' -f $version)), $utf8NoBom)
 $out = Join-Path $root "ollama-offline-agent-$version.vsix"
 if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
 $zip = Join-Path $root "ollama-offline-agent-$version.zip"
