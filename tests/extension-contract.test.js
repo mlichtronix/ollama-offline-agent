@@ -10,6 +10,8 @@ test('security controls remain present', () => {
   assert.match(source, /isSensitiveTarget/);
   assert.match(source, /stopProcessTree/);
   assert.match(source, /rollback_last_change/);
+  assert.match(source, /Allow for this task/);
+  assert.match(source, /approvedCommands\.clear\(\)/);
 });
 
 test('Ollama context and streaming remain configured', () => {
