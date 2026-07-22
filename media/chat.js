@@ -43,13 +43,18 @@ function tableCells(line) {
   for (let index = 0; index < source.length; index++) { const char = source[index]; if (char === '\\' && source[index + 1] === '|') { cell += '|'; index++; continue; } if (char === '`') inCode = !inCode; if (char === '|' && !inCode) { cells.push(cell.trim()); cell = ''; } else cell += char; }
   cells.push(cell.trim()); return cells;
 }
+function highlightCode(source, language) {
+  const code = escapeHtml(source); const lang = String(language || '').toLowerCase();
+  const keywords = lang === 'lua' ? /\b(?:and|break|do|else|elseif|end|false|for|function|if|in|local|nil|not|or|repeat|return|then|true|until|while)\b/g : lang === 'javascript' || lang === 'js' || lang === 'typescript' || lang === 'ts' ? /\b(?:async|await|const|class|else|export|false|for|function|if|import|let|new|null|return|true|undefined|while)\b/g : lang === 'python' || lang === 'py' ? /\b(?:and|as|class|def|elif|else|False|for|from|if|import|in|None|not|or|return|True|while)\b/g : /$^/g;
+  return code.replace(/(--[^\n]*|\/\/[^\n]*|#[^\n]*|&quot;(?:[^&]|&(?!quot;))*?&quot;|&#39;(?:[^&]|&(?!#39;))*?&#39;|\b\d+(?:\.\d+)?\b)/g, token => token.startsWith('--') || token.startsWith('//') || token.startsWith('#') ? `<span class="tok-comment">${token}</span>` : token.startsWith('&') ? `<span class="tok-string">${token}</span>` : `<span class="tok-number">${token}</span>`).replace(keywords, '<span class="tok-keyword">$&</span>');
+}
 function markdown(value) {
   const lines = String(value).replace(/\r/g, '').split('\n');
-  const out = []; let inCode = false; let code = []; let list = null;
+  const out = []; let inCode = false; let code = []; let codeLanguage = ''; let list = null;
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); code = []; } inCode = !inCode; continue; }
+    if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre class="language-${escapeHtml(codeLanguage || 'plain')}"><code>${highlightCode(code.join('\n'), codeLanguage)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
       closeList(); const headers = tableCells(line); const markdownRows = [line, lines[index + 1]]; index += 2; const rows = [];
@@ -61,7 +66,7 @@ function markdown(value) {
     if (unordered || ordered) { const type = ordered ? 'ol' : 'ul'; if (list && list !== type) closeList(); if (!list) { list = type; out.push(`<${type}>`); } out.push(`<li>${inlineMarkdown((unordered || ordered)[1])}</li>`); continue; }
     closeList(); out.push(line ? `<div>${inlineMarkdown(line)}</div>` : '<br>');
   }
-  closeList(); if (inCode) out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); return out.join('');
+  closeList(); if (inCode) out.push(`<pre class="language-${escapeHtml(codeLanguage || 'plain')}"><code>${highlightCode(code.join('\n'), codeLanguage)}</code></pre>`); return out.join('');
 }
 function attachmentMarkup(items, temporary = false) {
   if (!items?.length) return '';
@@ -113,6 +118,7 @@ const languageNames = new Intl.DisplayNames([navigator.language || 'en'], { type
 function closeMenus() { document.querySelectorAll('.setting-menu.open').forEach(menu => menu.classList.remove('open')); }
 function toggleMenu(id) { const menu = document.getElementById(id); const open = !menu.classList.contains('open'); closeMenus(); if (open) menu.classList.add('open'); }
 function renderSettings(message) {
+  const web = document.getElementById('web'); if (web) { web.classList.toggle('web-enabled', Boolean(message.webEnabled)); web.dataset.enabled = String(Boolean(message.webEnabled)); web.title = message.webEnabled ? 'Disable web access' : 'Enable web access'; }
   const mode = message.mode || 'workspace'; const permission = document.getElementById('permissions');
   permission.className = `permissions icon-only mode-${mode}`; permission.title = ({ workspace: 'Workspace access', guardedSystem: 'Guarded system access', fullSystem: 'Full system access' })[mode] || 'Permissions'; permission.innerHTML = shieldSvg(mode);
   document.getElementById('permissionsMenu').innerHTML = [['workspace', 'Workspace'], ['guardedSystem', 'Guarded system'], ['fullSystem', 'Full system']].map(([value, label]) => `<button data-access="${value}" class="mode-${value} ${value === mode ? 'selected' : ''}">${shieldSvg(value)}<span>${label}</span></button>`).join('');
@@ -144,6 +150,7 @@ document.addEventListener('wheel', event => { if (event.target.id !== 'temperatu
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && imageViewer.classList.contains('open')) { closeImageViewer(); return; } if (event.target.id === 'customModel' && event.key === 'Enter') { event.preventDefault(); vscode.postMessage({ type: 'pullModel', model: event.target.value }); } });
 const resizeHandle = document.getElementById('composerResize'); resizeHandle.addEventListener('pointerdown', event => { const startY = event.clientY; const startHeight = input.getBoundingClientRect().height; resizeHandle.setPointerCapture(event.pointerId); const move = next => { const height = Math.max(70, Math.min(window.innerHeight - 130, startHeight + startY - next.clientY)); input.style.height = `${height}px`; }; const up = () => { resizeHandle.removeEventListener('pointermove', move); resizeHandle.removeEventListener('pointerup', up); }; resizeHandle.addEventListener('pointermove', move); resizeHandle.addEventListener('pointerup', up); });
 document.getElementById('attach').onclick = () => resourceInput.click();
+document.getElementById('web').onclick = () => { const button = document.getElementById('web'); vscode.postMessage({ type: 'setWebEnabled', enabled: button.dataset.enabled !== 'true' }); };
 async function attachFiles(files) {
   const dropped = Array.from(files || []);
   if (!dropped.length) { add('status', 'No files were received from the drop operation.'); return; }
