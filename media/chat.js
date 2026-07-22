@@ -135,7 +135,7 @@ function renderWorkers(nextWorkers) {
   const draft = { name: document.getElementById('workerName')?.value || '', endpoint: document.getElementById('workerEndpoint')?.value || '', model: document.getElementById('workerModel')?.value || '', token: document.getElementById('workerToken')?.value || '' };
   const rows = workers.map(worker => {
     const health = workerHealth.get(worker.id); const state = health?.status || 'unknown';
-    const label = state === 'available' ? 'Available' : state === 'unavailable' ? 'Unavailable' : state === 'disabled' ? 'Disabled' : 'Not checked';
+    const label = state === 'available' ? 'Available' : state === 'model-missing' ? 'Model missing' : state === 'unavailable' ? 'Unavailable' : state === 'disabled' ? 'Disabled' : 'Not checked';
     const clearToken = workerTokenIds.has(worker.id) ? `<button data-clear-worker-token="${escapeHtml(worker.id)}" title="Clear saved Bearer token">${clearSvg}</button>` : '';
     const models = workerModels.get(worker.id)?.models || []; const modelOptions = models.map(item => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}${Number.isFinite(item.size) ? ` · ${item.size} GB` : ''}</option>`).join('');
     const editing = editingWorkerId === worker.id;

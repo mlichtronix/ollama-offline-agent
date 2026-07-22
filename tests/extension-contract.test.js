@@ -41,6 +41,7 @@ test('worker preflight requires the configured model on its endpoint', () => {
   assert.equal(modelAvailable([{ name: 'qwen3:8b' }], 'qwen3:8b'), true);
   assert.equal(modelAvailable([{ name: 'qwen3:latest' }], 'qwen3'), true);
   assert.equal(modelAvailable([{ name: 'qwen2.5:7b' }], 'qwen3:8b'), false);
+  assert.match(workerPoolSource, /status: 'model-missing'/);
 });
 
 test('worker reports preserve structured claims and distinguish host-fetched evidence', () => {
