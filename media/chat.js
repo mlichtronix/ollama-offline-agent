@@ -20,6 +20,7 @@ const replySvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 17-5-5
 const checkSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
 const banSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg>';
 const clearSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>';
+const xSvg = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
 const shieldSvg = mode => mode === 'guardedSystem' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></svg>' : mode === 'fullSystem' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="M12 8v4M12 16h.01"/></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/></svg>';
 
 function escapeHtml(value) {
@@ -61,7 +62,7 @@ function attachmentMarkup(items, temporary = false) {
   if (!items?.length) return '';
   const markup = items.map(item => {
     const name = escapeHtml(item.name || 'resource');
-    const remove = temporary ? `<button class="attachment-remove" data-remove-attachment="${escapeHtml(item.clientId)}" title="Cancel attachment">${clearSvg}</button>` : '';
+    const remove = temporary ? `<button class="attachment-remove" data-remove-attachment="${escapeHtml(item.clientId)}" title="Cancel attachment">${xSvg}</button>` : '';
     const content = String(item.mime || '').startsWith('image/') && (item.data || item.preview) ? `<img class="attachment-image" src="${item.preview || `data:${escapeHtml(item.mime)};base64,${item.data}`}" alt="${name}" title="${name}">` : `<span class="attachment-file" title="${name}">${name}</span>`;
     return temporary ? `<span class="queued-attachment">${content}${remove}</span>` : content;
   }).join('');
