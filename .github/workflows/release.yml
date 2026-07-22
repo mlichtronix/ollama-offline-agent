@@ -30,7 +30,10 @@ jobs:
           Get-Content -Raw -Encoding utf8 package.json | ConvertFrom-Json | Out-Null
       - name: Build VSIX
         shell: pwsh
-        run: .\package-vsix.ps1
+        run: |
+          .\package-vsix.ps1
+          $vsix = Get-ChildItem -File -Filter 'ollama-offline-agent-*.vsix' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Copy-Item -LiteralPath $vsix.FullName -Destination 'ollama-offline-agent.vsix' -Force
       - uses: actions/upload-artifact@v4
         with:
           name: ollama-offline-agent-vsix

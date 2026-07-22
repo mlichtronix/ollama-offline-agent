@@ -35,15 +35,24 @@ Invoke-RestMethod http://127.0.0.1:11434/api/version
 
 ## Installation
 
-1. Download the `.vsix` asset from the project's GitHub Releases page.
+### Latest release
+
+1. [Download the latest VSIX](https://github.com/mlichtronix/ollama-offline-agent/releases/latest/download/ollama-offline-agent.vsix).
 2. In VS Code, run **Extensions: Install from VSIX...** and select the downloaded file.
 3. Run **Developer: Reload Window**.
 
 Alternatively:
 
 ```powershell
-code --install-extension .\ollama-offline-agent-<version>.vsix
+Invoke-WebRequest https://github.com/mlichtronix/ollama-offline-agent/releases/latest/download/ollama-offline-agent.vsix -OutFile "$env:TEMP\ollama-offline-agent.vsix"
+code --install-extension "$env:TEMP\ollama-offline-agent.vsix"
 ```
+
+The command-line method requires the `code` command to be available in `PATH`. VSIX-installed extensions do not automatically update by default; download and install a newer release when one is published.
+
+### A specific release
+
+Open the [GitHub Releases page](https://github.com/mlichtronix/ollama-offline-agent/releases), download the versioned `.vsix` asset, and use the same VS Code command. This is useful when you need to install or keep a particular version.
 
 Open the **Ollama Agent** view and move it to the Secondary Sidebar if desired. The model menu lists the models installed in the local Ollama instance. Entering a model name and pressing Enter selects an installed model or requests Ollama to download it.
 

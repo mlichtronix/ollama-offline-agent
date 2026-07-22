@@ -233,3 +233,9 @@ test('the package script derives a unique VSIX version from Git history', () => 
   assert.match(packageScript, /Join-Path \$root 'lib'/);
   assert.match(packageScript, /UTF8Encoding\(\$false\)/);
 });
+
+test('release workflow publishes a stable latest-download VSIX asset', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(workflow, /fetch-depth: 0/);
+  assert.match(workflow, /ollama-offline-agent\.vsix/);
+});
