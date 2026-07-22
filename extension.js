@@ -624,7 +624,7 @@ class OfflineChatViewProvider {
     const arrow = '<svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>';
     const square = '<svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="10" height="10" x="7" y="7" rx="1"/></svg>';
     const route = '<svg class="steer-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="19" r="2"/><path d="M9 19h2a4 4 0 0 0 4-4V5"/><path d="m12 8 3-3 3 3"/></svg>';
-    const globe = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>';
+    const globe = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 2 20 20"/><path d="M12 21a9 9 0 0 0 8.84-7.3M18.6 18.6A9 9 0 0 1 3.16 10.3M6 6.3A9 9 0 0 1 20.84 10M12 3a14 14 0 0 1 3.3 10.7M12 21a14 14 0 0 1-3.3-10.7M3 12h7M14 12h7"/></svg>';
     const initialMode = config().get('accessMode', 'workspace');
     const initialModel = config().get('model');
     const initialModeLabel = ({ workspace: 'Workspace access', guardedSystem: 'Guarded system access', fullSystem: 'Full system access' })[initialMode] || 'Permissions';
