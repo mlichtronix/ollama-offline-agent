@@ -175,7 +175,7 @@ function renderWorkers(nextWorkers) {
   }
   const menu = document.getElementById('workersMenu'); if (!menu) return;
   let body = menu.querySelector('tbody');
-  if (!body || !workerIdsMatch(body)) { menu.innerHTML = `<div class="worker-table-wrap"><table class="worker-table"><thead><tr><th>Use</th><th>Name</th><th>Endpoint</th><th>Model</th><th>Bearer</th><th>Status</th><th></th></tr></thead><tbody>${workers.map(workerRowMarkup).join('') || '<tr><td class="menu-empty" colspan="7">Use + to add a worker.</td></tr>'}</tbody></table></div>`; return; }
+  if (!body || !workerIdsMatch(body)) { menu.innerHTML = `<div class="worker-table-wrap"><table class="worker-table"><colgroup><col class="worker-col-use"><col class="worker-col-name"><col class="worker-col-endpoint"><col class="worker-col-model"><col class="worker-col-bearer"><col class="worker-col-status"><col class="worker-col-actions"></colgroup><thead><tr><th>Use</th><th>Name</th><th>Endpoint</th><th>Model</th><th>Bearer</th><th>Status</th><th></th></tr></thead><tbody>${workers.map(workerRowMarkup).join('') || '<tr><td class="menu-empty" colspan="7">Use + to add a worker.</td></tr>'}</tbody></table></div>`; return; }
   workers.forEach(worker => syncWorkerRow(body.querySelector(`[data-worker-row="${CSS.escape(worker.id)}"]`), worker));
 }
 function renderSettings(message) {
