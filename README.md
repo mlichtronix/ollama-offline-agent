@@ -63,7 +63,7 @@ While a response is running, an empty composer shows **Stop**. With text in the 
 
 Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, an optional Bearer token, and an enabled state. Tokens are stored per worker in VS Code Secret Storage. Load the models installed on a worker into the model picker, or enter a custom `model:tag`. The **Check** action verifies availability without starting a task.
 
-Before a new master task starts, enabled workers are checked in parallel. The master then creates a delegation plan: each available worker is assigned a distinct expert role and non-overlapping read-only subtask, while the master retains implementation, integration, and verification. Assignments and results are written to the Output channel.
+Before a new master task starts, enabled workers are checked in parallel. The master then creates a delegation plan: each available worker is assigned a distinct expert role and non-overlapping read-only subtask, while the master retains implementation, integration, and verification. Assignments and results are written to the Output channel. Full worker reports are retained as internal local chat-history records; they do not clutter the chat UI, but the master can retrieve a specific report by its ID when it needs detail beyond the compact handoff.
 
 Each available expert can use only these tools through the master host:
 

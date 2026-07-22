@@ -205,7 +205,14 @@ async function checkWorkers() {
 function workerFindingsContext(results) {
   const completed = results.filter(item => item.text);
   if (!completed.length) return '';
-  return `\n\nDelegated expert findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting:\n${completed.map(item => `\n[${item.worker.name} — assigned: ${item.task}]\n${truncate(item.text, 5000)}`).join('\n')}`;
+  return `\n\nDelegated expert findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting. Use read_chat_messages with a report ID only when you need details omitted below:\n${completed.map(item => `\n[${item.worker.name} — ${item.role || 'specialist'} — report ${item.reportId}; assigned: ${item.task}]\n${truncate(item.text, 8000)}`).join('\n')}`;
+}
+function rememberWorkerReports(results) {
+  for (const result of results) {
+    if (!result.text) continue;
+    const text = `# Expert worker report\n\nWorker: ${result.worker.name}\nRole: ${result.role || 'specialist'}\nAssignment: ${result.task || ''}\n\n${truncate(result.text, 32000)}`;
+    result.reportId = chatStore.append('worker', text, { internal: true }).id;
+  }
 }
 function fallbackWorkerPlan(workers) {
   const specialities = [
@@ -284,7 +291,8 @@ function searchChatHistory(query, limit) {
 function readChatMessages(ids) {
   const wanted = new Set((Array.isArray(ids) ? ids : []).map(String)); if (!wanted.size) return 'Provide one or more chat message IDs.';
   const messages = chatHistory.filter(event => wanted.has(String(event.id)));
-  return messages.length ? truncate(messages.map(event => `[${event.id}] ${event.kind} ${event.createdAt || ''}\n${event.text}`).join('\n\n'), 14000) : '(no matching chat messages)';
+  const limit = messages.length === 1 && messages[0].internal && messages[0].kind === 'worker' ? 32000 : 14000;
+  return messages.length ? truncate(messages.map(event => `[${event.id}] ${event.kind} ${event.createdAt || ''}\n${event.text}`).join('\n\n'), limit) : '(no matching chat messages)';
 }
 function latestAssistantContext() { return chatStore.latestAssistant(); }
 async function loadSkills(task) {
@@ -502,6 +510,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
       const dispatch = await workerPool.delegate(taskWithResources, { health, assignments: plan.assignments, language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
       for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
+      rememberWorkerReports(dispatch.results);
       workerContext = `\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it.` + workerFindingsContext(dispatch.results);
     }
     postUi('workerHealth', { workers: health });
@@ -715,7 +724,7 @@ class OfflineChatViewProvider {
     void publishSettings(view);
     void this.post(view, {
       type: 'historySnapshot',
-      messages: chatHistory.map(event => this.uiEvent(view.webview, event)),
+      messages: chatHistory.filter(event => !event.internal).map(event => this.uiEvent(view.webview, event)),
       streams: [...activeStreams.entries()].map(([id, stream]) => ({ id, ...stream })),
       working: running
     });
