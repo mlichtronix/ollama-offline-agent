@@ -511,7 +511,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const dispatch = await workerPool.delegate(taskWithResources, { health, assignments: plan.assignments, language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
       for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
       rememberWorkerReports(dispatch.results);
-      workerContext = `\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it.` + workerFindingsContext(dispatch.results);
+      workerContext = `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it.` + workerFindingsContext(dispatch.results);
     }
     postUi('workerHealth', { workers: health });
   }

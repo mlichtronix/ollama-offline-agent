@@ -92,6 +92,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /fallbackWorkerPlan/);
   assert.match(source, /rememberWorkerReports/);
   assert.match(source, /event\.internal/);
+  assert.match(source, /Worker delegation is host-managed/);
   assert.match(source, /workerTokenKey/);
   assert.match(source, /setWorkerToken/);
   assert.match(source, /loadWorkerModels/);
