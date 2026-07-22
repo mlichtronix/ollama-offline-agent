@@ -6,8 +6,11 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $parts = @($packageSource.version -split '\.')
 $revision = 0
 try { $revision = [int](& git -C $root rev-list --count HEAD 2>$null) } catch {}
-if ($revision -le 0) { $revision = [int]$parts[2] }
-$version = "$($parts[0]).$($parts[1]).$revision"
+$baseRevision = 0
+try { $baseRevision = [int]$packageSource.versionBaseRevision } catch {}
+if ($revision -le 0) { $revision = $baseRevision + [int]$parts[2] }
+$patch = [Math]::Max(0, $revision - $baseRevision)
+$version = "$($parts[0]).$($parts[1]).$patch"
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('ollama-agent-vsix-' + [guid]::NewGuid())
 $extension = Join-Path $stage 'extension'
 New-Item -ItemType Directory -Path $extension -Force | Out-Null

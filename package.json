@@ -2,7 +2,8 @@
   "name": "ollama-offline-agent",
   "displayName": "Ollama Offline Coding Agent",
   "description": "Offline autonomous coding agent using a local Ollama server.",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "versionBaseRevision": 100,
   "publisher": "local",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
@@ -59,7 +60,7 @@
         "ollamaOffline.commandTimeoutSeconds": { "type": "number", "default": 0, "minimum": 0, "maximum": 1800, "description": "Maximum duration of one agent shell command. 0 means no timeout; Stop always cancels it." },
         "ollamaOffline.webEnabled": { "type": "boolean", "default": true, "description": "Allow the agent to search and retrieve public web pages. Controlled by the Globe button in chat; private and LAN addresses remain blocked." },
         "ollamaOffline.workers": { "type": "array", "default": [], "items": { "type": "object", "required": ["name", "endpoint", "model"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "endpoint": { "type": "string" }, "model": { "type": "string" }, "enabled": { "type": "boolean" } } }, "description": "Optional read-only Ollama workers. The master verifies them before each task and may send the task to available workers for independent findings." }
-        ,"ollamaOffline.accessMode": { "type": "string", "default": "workspace", "enum": ["workspace", "guardedSystem", "fullSystem"], "enumDescriptions": ["Agent can access only the open workspace.", "Agent can inspect the system and work outside the workspace; every write and command remains individually approved and critical paths are blocked.", "Agent can work anywhere accessible to the current Windows user, including local application installs. Every write and command still requires approval; destructive commands remain blocked."], "description": "Filesystem and command access boundary." }
+        ,"ollamaOffline.accessMode": { "type": "string", "default": "workspace", "enum": ["workspace", "guardedSystem", "fullSystem"], "enumDescriptions": ["Agent can access only the open workspace.", "Agent can inspect the system and work outside the workspace; every write and command remains individually approved and critical paths are blocked.", "Agent can run safe commands anywhere accessible to the current Windows user, including local application installs, without repeated command prompts. File writes, restores and deletions remain approved; destructive commands are blocked."], "description": "Filesystem and command access boundary." }
         ,"ollamaOffline.protectedPaths": { "type": "array", "default": ["C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData", "C:\\Users\\*\\.ssh", "C:\\Users\\*\\AppData\\Roaming\\Code\\User"], "items": { "type": "string" }, "description": "System paths that the agent may inspect but may not write. Use * for one path segment." }
       }
     }

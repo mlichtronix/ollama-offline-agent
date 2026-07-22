@@ -113,6 +113,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /latestAssistantContext/);
   assert.match(source, /function steer\(/);
   assert.match(source, /function queueAgentRequest/);
+  assert.match(source, /Steering accepted at the completed subtask boundary/);
+  assert.doesNotMatch(source, /Steering requested: \$\{task\}\); requestStop\(\)/);
+  assert.match(source, /setPromptState\(id, 'waiting'\)/);
+  assert.match(source, /setPromptState\(id, 'queued'\)/);
+  assert.match(source, /setPromptState\(promptId, 'delivered'\)/);
+  assert.match(source, /setPromptState\(promptId, 'read'\)/);
   assert.match(source, /queuedAgentRequests/);
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.match(chatSource, /data-steering-mode/);
@@ -199,6 +205,8 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /Deletion is limited to a file inside the current workspace/);
   assert.match(source, /type: 'taskUi'/);
   assert.match(chatSource, /data-task-mode/);
+  assert.match(chatSource, /message-receipt/);
+  assert.match(chatSource, /receiptInfo/);
   assert.match(chatSource, /id = 'taskPanel'/);
   assert.match(chatSource, /Restore latest checkpoint/);
   assert.match(chatSource, /data-task-diff/);
@@ -293,6 +301,8 @@ test('the chat view has one current HTML renderer', () => {
 test('the package script derives a unique VSIX version from Git history', () => {
   const packageScript = fs.readFileSync(path.join(__dirname, '..', 'package-vsix.ps1'), 'utf8');
   assert.match(packageScript, /git -C \$root rev-list --count HEAD/);
+  assert.match(packageScript, /versionBaseRevision/);
+  assert.match(packageScript, /\$revision - \$baseRevision/);
   assert.match(packageScript, /ollama-offline-agent-\$version\.vsix/);
   assert.match(packageScript, /Join-Path \$root 'lib'/);
   assert.match(packageScript, /UTF8Encoding\(\$false\)/);

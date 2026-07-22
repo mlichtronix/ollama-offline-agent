@@ -29,6 +29,7 @@ let endpointTokenReady = Promise.resolve();
 let pendingSteering;
 let activeAgentMessages;
 const queuedAgentRequests = [];
+const promptStates = new Map();
 let activeWebSources = [];
 const workerBenchmarks = new Map();
 let activeTaskUi;
@@ -65,6 +66,11 @@ function postUi(type, data = {}) {
   // Its snapshot will include all state accumulated while it was unavailable.
   const sources = type === 'message' ? (data.sources || []).map(item => ({ ...item, source: true })) : [];
   if (chatView) void chatProvider?.post(chatView, { type, ...data, ...(sources.length ? { attachments: [...(data.attachments || []), ...sources] } : {}) });
+}
+function setPromptState(id, state) {
+  if (!id) return;
+  promptStates.set(String(id), state);
+  postUi('promptState', { id: String(id), state });
 }
 function updateTaskUi(phase, status = 'active', detail = '') {
   if (!activeTaskUi) return;
@@ -119,7 +125,7 @@ function postChat(kind, text, display = true, id = messageId(), attachments = []
   const event = chatStore.append(kind, text, { id, attachments, replyTo, createdAt });
   if (display) postUi('message', event);
 }
-function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const event = chatStore.rememberUser(contextText, visibleText, id, attachments, replyTo); if (!alreadyVisible) postUi('message', event); }
+function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const event = chatStore.rememberUser(contextText, visibleText, id, attachments, replyTo); if (!alreadyVisible) postUi('message', event); return event; }
 function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt, activeWebSources); postUi('message', event); }
 function deleteChatMessage(id) {
   if (chatStore.remove(id)) postUi('messageDeleted', { id });
@@ -653,7 +659,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const taskWithResources = task + resourceNote + replyNote;
   // Resource paths are part of the model-only context. The persisted and
   // displayed user message intentionally contains only what the user wrote.
-  rememberUser(taskWithResources, task, Boolean(initialTask), providedId, attachments, replyTo);
+  const userEvent = rememberUser(taskWithResources, task, Boolean(initialTask), providedId, attachments, replyTo);
+  const promptId = String(providedId || userEvent.id);
   const userMessage = { role: 'user', content: taskWithResources };
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
@@ -685,12 +692,15 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
+  let promptRead = false;
   try {
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
       vscode.window.setStatusBarMessage(`Ollama agent: step ${step}`, 3000);
       const streamId = messageId(); let thinkingStarted = false;
       updateTaskUi(step === 1 ? 'analyze' : 'continue', 'active', step === 1 ? 'Analyzing evidence and choosing the next action.' : `Continuing agent work (step ${step}).`);
+      if (!promptRead) setPromptState(promptId, 'delivered');
       const data = await chat(messages, partial => {
+        if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
         if (partial.content) {
           const stream = activeStreams.get(streamId) || { text: '', createdAt: new Date().toISOString() };
@@ -698,6 +708,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
         }
       }, taskTools);
+      if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
       messages.push(message);
@@ -722,7 +733,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         if (isTestCommand(call)) failingTest = testFailed(result) ? result : '';
         log(`${call.function.name}: ${truncate(result, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
+        if (pendingSteering) break;
       }
+      if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
   } catch (error) { if (cancelled && error.name === 'AbortError') { updateTaskUi('complete', 'stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { updateTaskUi('complete', 'failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) { activeTaskUi.state = cancelled ? 'stopped' : 'failed'; postUi('taskUi', activeTaskUi); } }
@@ -737,9 +750,10 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
 }
 function steer(task, id, attachments = [], replyTo, mode = 'execute') {
   if (!running) return ask(task, id, attachments, replyTo, undefined, mode);
-  pendingSteering = { text: task, id, attachments, replyTo, mode }; log(`Steering requested: ${task}`); requestStop();
+  if (pendingSteering?.id) setPromptState(pendingSteering.id, 'superseded');
+  pendingSteering = { text: task, id, attachments, replyTo, mode }; setPromptState(id, 'waiting'); log(`Steering requested; it will apply after the current subtask: ${task}`);
 }
-function queueAgentRequest(task, id, attachments = [], replyTo, mode = 'execute') { if (!running) return ask(task, id, attachments, replyTo, undefined, mode); queuedAgentRequests.push({ text: task, id, attachments, replyTo, mode }); log(`Queued follow-up: ${task}`); }
+function queueAgentRequest(task, id, attachments = [], replyTo, mode = 'execute') { if (!running) return ask(task, id, attachments, replyTo, undefined, mode); queuedAgentRequests.push({ text: task, id, attachments, replyTo, mode }); setPromptState(id, 'queued'); log(`Queued follow-up: ${task}`); }
 async function health() {
   try { const info = await ollama.version(); vscode.window.showInformationMessage(`Ollama endpoint is ready (version ${info.version}).`); }
   catch (error) { vscode.window.showErrorMessage(`Ollama endpoint is unavailable: ${error.message}.`); }
@@ -820,7 +834,7 @@ async function newChat() {
   if (running) return vscode.window.showWarningMessage('Stop the current agent run before starting a new chat.');
   const confirmed = await vscode.window.showWarningMessage('Clear this workspace chat history? This removes the visible conversation and its local context.', { modal: true }, 'Clear Chat History');
   if (confirmed !== 'Clear Chat History') return;
-  await chatStore.clear(); pendingResources.length = 0;
+  await chatStore.clear(); pendingResources.length = 0; promptStates.clear();
   postUi('historyCleared');
 }
 function openChatEditor() { chatProvider.openInEditor(); }
@@ -901,6 +915,7 @@ class OfflineChatViewProvider {
       streams: [...activeStreams.entries()].map(([id, stream]) => ({ id, ...stream })),
       working: running
     });
+    for (const [id, state] of promptStates) void this.post(view, { type: 'promptState', id, state });
     if (activeTaskUi) void this.post(view, { type: 'taskUi', ...activeTaskUi });
   }
   uiEvent(webview, event) {
