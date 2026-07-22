@@ -49,8 +49,18 @@ const viewerImage = imageViewer.querySelector('img'); function openImageViewer(i
 const workerHelp = 'Workers can read chat and project context, and use enabled public web tools. They cannot write, run commands, or mutate Git.';
 const workersDialog = document.createElement('section'); workersDialog.id = 'workersDialog'; workersDialog.className = 'worker-dialog'; workersDialog.setAttribute('aria-labelledby', 'workersDialogTitle'); workersDialog.innerHTML = `<section class="worker-dialog-card"><header class="worker-dialog-header"><strong id="workersDialogTitle" title="${workerHelp}">Read-only workers</strong><div><button id="addWorkerRow" class="icon-only" title="Add worker row" aria-label="Add worker row">${plusSvg}</button><button id="checkWorkers" title="Check worker availability">Check</button><button id="closeWorkersDialog" class="icon-only" title="Close worker manager" aria-label="Close worker manager">${xSvg}</button></div></header><div id="workersMenu" class="workers-menu"></div><aside id="workerTokenPopover" class="worker-token-popover" aria-label="Worker Bearer token"><header><strong>Bearer token</strong><button id="closeWorkerToken" class="icon-only" title="Close token editor" aria-label="Close token editor">${xSvg}</button></header><input id="workerTokenEditor" type="password" autocomplete="off" placeholder="Optional Bearer token — stored securely"><footer><button id="clearWorkerToken" class="secondary">Clear</button><button id="saveWorkerToken">Save</button></footer></aside></section>`; composer.before(workersDialog);
 const taskPanel = document.createElement('section'); taskPanel.id = 'taskPanel'; taskPanel.className = 'task-panel'; composer.before(taskPanel);
+let taskTimer;
+function formatTaskDuration(startedAt, finishedAt) {
+  const started = Date.parse(startedAt || ''); const finished = finishedAt ? Date.parse(finishedAt) : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) return '';
+  const seconds = Math.max(0, Math.floor((finished - started) / 1000));
+  const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); const remainder = seconds % 60;
+  return `${hours ? `${hours}:` : ''}${String(minutes).padStart(hours ? 2 : 1, '0')}:${String(remainder).padStart(2, '0')}`;
+}
+function refreshTaskDuration() { const duration = document.getElementById('taskDuration'); if (duration) duration.textContent = formatTaskDuration(taskUi?.startedAt, taskUi?.finishedAt); }
+function syncTaskTimer() { clearInterval(taskTimer); refreshTaskDuration(); if (taskUi?.state === 'running' && taskUi?.startedAt) taskTimer = setInterval(refreshTaskDuration, 1000); }
 function renderTaskUi() {
-  if (!taskUi?.timeline?.length) { taskPanel.hidden = true; return; }
+  if (!taskUi?.timeline?.length) { clearInterval(taskTimer); taskPanel.hidden = true; return; }
   taskPanel.hidden = false;
   const labels = { understand: 'Understand', analyze: 'Analyze', research: 'Research', tools: 'Work', implement: 'Implement', verify: 'Verify', continue: 'Continue', plan: 'Plan ready', complete: 'Complete' };
   const timeline = taskUi.timeline.map(item => `<li class="${escapeHtml(item.status)}" title="${escapeHtml(item.detail || labels[item.phase] || item.phase)}"><span></span><strong>${escapeHtml(labels[item.phase] || item.phase)}</strong></li>`).join('');
@@ -61,9 +71,10 @@ function renderTaskUi() {
   const checksMarkup = checks.length ? `<details class="review-checks"${failedChecks ? ' open' : ''}><summary class="${failedChecks ? 'failed' : 'passed'}">${failedChecks ? `${failedChecks} check${failedChecks === 1 ? '' : 's'} failed` : `${passedChecks} check${passedChecks === 1 ? '' : 's'} passed`}</summary><div>${checks.map(check => `<span class="${check.passed ? 'passed' : 'failed'}">${check.passed ? '✓' : '×'} ${escapeHtml(check.command)}</span>`).join('')}</div></details>` : '';
   const actions = `${taskUi.canRestore ? `<button id="restoreCheckpoint" class="task-undo" title="Restore latest checkpoint">Undo ${undoSvg}</button>` : ''}${files.length ? `<span class="review-summary"><b class="added">+${added}</b><b class="removed">-${removed}</b></span>` : ''}`;
   const review = hasReview ? `<section class="task-review"><header><strong>${files.length ? `Edited ${files.length} file${files.length === 1 ? '' : 's'}` : 'Review'}</strong><div class="review-actions">${actions}</div></header>${files.length ? `<ul class="review-files">${files.map(file => `<li${file.deleted ? ' class="deleted"' : ''}><button class="task-file-diff" data-task-diff="${escapeHtml(file.path)}" title="Open ${escapeHtml(file.path)}">${file.deleted ? 'Deleted: ' : ''}${escapeHtml(file.path)}</button><span><b class="added">+${Number(file.added || 0)}</b><b class="removed">-${Number(file.removed || 0)}</b></span></li>`).join('')}</ul>` : ''}${checksMarkup}</section>` : '';
-  taskPanel.innerHTML = `<header><strong>${escapeHtml(taskUi.mode === 'plan' ? 'Plan' : taskUi.mode === 'ask' ? 'Ask' : 'Task')}</strong><span>${escapeHtml(taskUi.state || '')}</span></header><ol>${timeline}</ol>${review}`;
+  taskPanel.innerHTML = `<header><div><strong>${escapeHtml(taskUi.mode === 'plan' ? 'Plan' : taskUi.mode === 'ask' ? 'Ask' : 'Task')}</strong><span id="taskDuration" class="task-duration" title="${taskUi.finishedAt ? 'Task duration' : 'Task is running'}"></span></div><span>${escapeHtml(taskUi.state || '')}</span></header><ol>${timeline}</ol>${review}`;
   document.getElementById('restoreCheckpoint')?.addEventListener('click', () => vscode.postMessage({ type: 'restoreCheckpoint' }));
   taskPanel.querySelectorAll('[data-task-diff]').forEach(button => button.addEventListener('click', () => vscode.postMessage({ type: 'openTaskDiff', path: button.dataset.taskDiff })));
+  syncTaskTimer();
 }
 renderTaskUi();
 function openWorkersDialog() { renderWorkers(); closeMenus(); workersDialog.classList.add('open'); document.getElementById('closeWorkersDialog').focus(); for (const worker of workers) vscode.postMessage({ type: 'loadWorkerModels', id: worker.id }); }

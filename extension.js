@@ -18,7 +18,7 @@ let editorChatPanel;
 let chatProvider;
 const pendingResources = [];
 const cancelledResourceClients = new Set();
-let activeAbortController;
+const activeAbortControllers = new Set();
 let activeChild;
 let environmentDescription;
 let extensionVersion = 'unknown';
@@ -117,8 +117,11 @@ function recordTaskCheck(command, result) {
   if (!activeTaskUi) return;
   activeTaskUi.checks.push({ command: truncate(command, 180), passed: !testFailed(result), result: truncate(result, 600) }); postUi('taskUi', activeTaskUi);
 }
+function createActiveAbortController() { const controller = new AbortController(); activeAbortControllers.add(controller); return controller; }
+function releaseActiveAbortController(controller) { activeAbortControllers.delete(controller); }
+function throwIfCancelled() { if (cancelled) throw Object.assign(new Error('Stopped by user.'), { name: 'AbortError' }); }
 function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
-function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
+function requestStop() { cancelled = true; for (const controller of activeAbortControllers) controller.abort(); stopProcessTree(); log('Stop requested: aborting active Ollama and worker requests.'); }
 function saveState() { return chatStore.save(); }
 async function ensureWorkspaceState() { const previous = chatStore.stateFile; await chatStore.ensureWorkspace(); if (previous !== chatStore.stateFile) chatProvider?.replay(); }
 function postChat(kind, text, display = true, id = messageId(), attachments = [], replyTo, createdAt = new Date().toISOString()) {
@@ -319,7 +322,7 @@ function parseDelegationPlan(content, workers, maxTasks) {
     return { masterFocus: truncate(String(value.masterFocus || 'Implement, integrate, and validate the requested change.').trim(), 1200), assignments, delegationReason: delegationReason || 'Independent expert research is useful for this task.' };
   } catch { return undefined; }
 }
-async function dispatchWorkerPlan(task, health, plan, lastAssistant) {
+async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
   const pending = new Map(plan.assignments.map(item => [item.workerId, item]));
   const results = [];
   while (pending.size) {
@@ -331,7 +334,8 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant) {
       const context = dependencies.length ? '\n\nCompleted dependency reports are available for this subtask. Reuse only relevant findings and validate them:\n' + dependencies.map(result => { const excerpt = truncate(result.text, Math.min(8000, remaining)); remaining -= excerpt.length; return '[' + result.worker.name + ' — ' + result.role + ']\n' + excerpt; }).join('\n\n') : '';
       return { ...item, task: item.task + context };
     });
-    const dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
+    throwIfCancelled();
+    const dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal });
     results.push(...dispatch.results);
     for (const item of ready) pending.delete(item.workerId);
   }
@@ -342,7 +346,7 @@ async function planWorkerAssignments(task, workers, lastAssistant, maxTasks) {
   const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}; runtime profile: ${workerCapabilityDescription(worker)}`).join('\n');
   const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Never assign image analysis without vision, tool-dependent research without tool_calling, large source/context analysis without an adequate context requirement, or latency-sensitive/long-running work without fast_inference. Write masterFocus, role, task, and requires in English so every worker receives an English assignment while preserving all user constraints. requires must contain every capability needed, selected only from: ${[...workerRequirementNames].join(', ')}. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"...","requires":["project_files","tool_calling"]}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
   const plannerGraph = ' First decide whether delegation is worthwhile. For a direct, narrow, or low-risk task return delegate:false, a short delegationReason, and no assignments. Otherwise return delegate:true, a short delegationReason, and no more than ' + maxTasks + ' assignments. An explicit user maximum is an upper bound, not a requirement to use that many workers. When there are fewer workers than explicitly requested expert topics, consolidate those requested topics into the available worker assignments instead of substituting generic roles. Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
-  const controller = new AbortController(); activeAbortController = controller;
+  const controller = createActiveAbortController();
   try {
     const response = await ollama.chat({ model: await configuredModel(), messages: [{ role: 'system', content: plannerSystem + plannerGraph }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], tools: [], temperature: 0.1, contextWindow: Number(config().get('contextWindow', 0)), signal: controller.signal, onThinkingUnsupported: model => log(`Planner model ${model} does not support thinking; continuing without it.`) });
     return parseDelegationPlan(response.message?.content, workers, maxTasks) || fallback;
@@ -350,7 +354,7 @@ async function planWorkerAssignments(task, workers, lastAssistant, maxTasks) {
     if (error.name === 'AbortError') throw error;
     log(`Worker planner failed (${error.message}); using distinct fallback specialist roles.`);
     return fallback;
-  } finally { if (activeAbortController === controller) activeAbortController = undefined; }
+  } finally { releaseActiveAbortController(controller); }
 }
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
@@ -576,7 +580,7 @@ function runCommand(command, requestedCwd) {
 }
 function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
 async function chat(messages, onChunk, taskTools = tools) {
-  const controller = new AbortController(); activeAbortController = controller;
+  const controller = createActiveAbortController();
   try {
     return await ollama.chat({
       model: config().get('model'), messages, tools: taskTools,
@@ -585,7 +589,7 @@ async function chat(messages, onChunk, taskTools = tools) {
       signal: controller.signal, onChunk,
       onThinkingUnsupported: model => log(`Model ${model} does not support thinking; continuing without it.`)
     });
-  } finally { if (activeAbortController === controller) activeAbortController = undefined; }
+  } finally { releaseActiveAbortController(controller); }
 }
 function extractCalls(message) {
   if (Array.isArray(message.tool_calls) && message.tool_calls.length) return message.tool_calls;
@@ -643,7 +647,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (!task) return;
   await ensureWorkspaceState();
   const taskMode = ['ask', 'plan', 'execute'].includes(requestedMode) ? requestedMode : 'execute';
-  activeTaskUi = { mode: taskMode, state: 'running', timeline: [], files: [], checks: [], canRestore: false };
+  activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], files: [], checks: [], canRestore: false };
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts; destructive system commands remain blocked, while file writes and restores still require explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
@@ -669,7 +673,11 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (!continuationMessages && configuredWorkers().some(worker => worker.enabled)) {
     updateTaskUi('research', 'active', 'Checking available expert workers.');
     log('Checking configured read-only workers before starting the master task.');
-    const health = await workerPool.health(); const available = health.filter(worker => worker.status === 'available');
+    const workerController = createActiveAbortController();
+    let health;
+    try { health = await workerPool.health({ signal: workerController.signal }); }
+    finally { releaseActiveAbortController(workerController); }
+    throwIfCancelled(); const available = health.filter(worker => worker.status === 'available');
     for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
     if (available.length) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
@@ -677,7 +685,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks);
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
       if (!plan.assignments.length) log('Worker delegation skipped: ' + plan.delegationReason);
-      const dispatch = await dispatchWorkerPlan(taskWithResources, health, plan, lastAssistant);
+      throwIfCancelled();
+      const workerController = createActiveAbortController();
+      let dispatch;
+      try { dispatch = await dispatchWorkerPlan(taskWithResources, health, plan, lastAssistant, workerController.signal); }
+      finally { releaseActiveAbortController(workerController); }
+      throwIfCancelled();
       for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}${result.quality?.repairAttempted ? result.quality.accepted ? ' after one host-requested report correction' : ' after one unsuccessful host-requested report correction' : ''}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
       rememberWorkerReports(dispatch.results);
       const workerCapacity = '\n\nDelegation capacity: ' + plan.assignments.length + ' assignment(s) were selected from ' + available.length + ' available worker(s), with a configured maximum of ' + maxWorkerTasks + '. A requested maximum is an upper bound, not missing work. Do not claim that unassigned expert roles were required or missing.';
@@ -698,7 +711,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       vscode.window.setStatusBarMessage(`Ollama agent: step ${step}`, 3000);
       const streamId = messageId(); let thinkingStarted = false;
       updateTaskUi(step === 1 ? 'analyze' : 'continue', 'active', step === 1 ? 'Analyzing evidence and choosing the next action.' : `Continuing agent work (step ${step}).`);
-      if (!promptRead) setPromptState(promptId, 'delivered');
+      throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
       const data = await chat(messages, partial => {
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
@@ -722,7 +735,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const response = message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
+        const response = message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });
@@ -738,12 +751,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
-  } catch (error) { if (cancelled && error.name === 'AbortError') { updateTaskUi('complete', 'stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { updateTaskUi('complete', 'failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) { activeTaskUi.state = cancelled ? 'stopped' : 'failed'; postUi('taskUi', activeTaskUi); } }
+  } catch (error) { if (cancelled && error.name === 'AbortError') { updateTaskUi('complete', 'stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { updateTaskUi('complete', 'failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) { activeTaskUi.state = cancelled ? 'stopped' : 'failed'; activeTaskUi.finishedAt ||= new Date().toISOString(); postUi('taskUi', activeTaskUi); } }
   finally {
     const steering = pendingSteering; pendingSteering = undefined;
     const continuation = activeAgentMessages ? [...activeAgentMessages] : undefined;
     for (const [id, stream] of activeStreams) { if (steering && stream.text) continuation?.push({ role: 'assistant', content: stream.text }); if (steering) postUi('assistantClear', { id }); }
-    activeStreams.clear(); activeAgentMessages = undefined; if (activeTaskUi?.state === 'running') { activeTaskUi.state = cancelled ? 'stopped' : 'complete'; updateTaskUi('complete', cancelled ? 'stopped' : 'complete', cancelled ? 'Stopped by user.' : 'Finished.'); postUi('taskUi', activeTaskUi); } running = false; postUi('runState', { working: false });
+    activeStreams.clear(); activeAgentMessages = undefined; if (activeTaskUi?.state === 'running') { activeTaskUi.state = cancelled ? 'stopped' : 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi('complete', cancelled ? 'stopped' : 'complete', cancelled ? 'Stopped by user.' : 'Finished.'); postUi('taskUi', activeTaskUi); } running = false; postUi('runState', { working: false });
     if (steering) await ask(steering.text, steering.id, steering.attachments, steering.replyTo, continuation, steering.mode);
     else if (queuedAgentRequests.length) { const next = queuedAgentRequests.shift(); await ask(next.text, next.id, next.attachments, next.replyTo, undefined, next.mode); }
   }

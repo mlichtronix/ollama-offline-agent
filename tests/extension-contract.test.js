@@ -150,9 +150,13 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /cached\?\.key === key/);
   assert.match(source, /const needsBenchmark = configuredWorkers\(\)\.some/);
   assert.match(source, /item\.requires\.every\(capability => workerRequirementNames\.has\(capability\)\)/);
-  assert.match(ollamaClientSource, /async modelProfile\(model\)/);
-  assert.match(ollamaClientSource, /async benchmark\(model\)/);
-  assert.match(workerPoolSource, /async health\(\{ benchmark = false \} = \{\}\)/);
+  assert.match(ollamaClientSource, /async modelProfile\(model, signal\)/);
+  assert.match(ollamaClientSource, /async benchmark\(model, signal\)/);
+  assert.match(workerPoolSource, /async health\(\{ benchmark = false, signal \} = \{\}\)/);
+  assert.match(source, /const activeAbortControllers = new Set\(\)/);
+  assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
+  assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);
+  assert.match(chatSource, /function formatTaskDuration\(/);
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
