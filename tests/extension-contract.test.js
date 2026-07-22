@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
-const { normalizeWorkers } = require('../lib/worker-pool');
+const { normalizeWorkers, normalizeWorkerReport, workerReportMarkdown } = require('../lib/worker-pool');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
@@ -35,6 +35,24 @@ test('worker definitions accept only complete HTTP read-only endpoints', () => {
     { id: 'missing-model', name: 'Incomplete', endpoint: 'http://192.168.1.21:11434' }
   ]);
   assert.deepEqual(workers, [{ id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434', model: 'qwen3:8b', enabled: true }]);
+});
+
+test('worker reports preserve structured claims and distinguish host-fetched evidence', () => {
+  const fetched = new Set(['https://registry.npmjs.org/example']);
+  const report = normalizeWorkerReport(JSON.stringify({
+    summary: 'Checked package metadata.',
+    findings: [
+      { claim: 'The package version is 1.2.3.', confidence: 'verified', evidence: [{ url: 'https://registry.npmjs.org/example', note: 'Registry metadata.' }] },
+      { claim: 'A blog repeats the version.', confidence: 'verified', evidence: [{ url: 'https://example.com/blog', note: 'Not fetched.' }] }
+    ],
+    risks: ['Release dates may change.'], nextSteps: ['Master should inspect the registry response.'], unverified: []
+  }), fetched);
+  assert.equal(report.format, 'structured');
+  assert.equal(report.findings[0].confidence, 'verified');
+  assert.equal(report.findings[0].evidence[0].fetched, true);
+  assert.equal(report.findings[1].confidence, 'unverified');
+  assert.match(workerReportMarkdown(report), /Host-fetched evidence/);
+  assert.match(workerReportMarkdown(report), /Host evidence audit/);
 });
 
 test('chat store persists UTF-8 history and matching conversation context', async () => {
