@@ -63,15 +63,37 @@ The actual built-in capabilities are: listing, reading, searching, and writing f
 
 function log(text) { output.appendLine(text); }
 function escapeExportHtml(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function exportInlineMarkdown(value) { return escapeExportHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>'); }
+function exportTableCells(line) { return String(line).trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, '|')); }
+function exportMarkdown(value) {
+  const lines = String(value || '').replace(/\r/g, '').split('\n'); const out = []; let code = []; let inCode = false; let list;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = undefined; } };
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre><code>${escapeExportHtml(code.join('\n'))}</code></pre>`); code = []; } inCode = !inCode; continue; }
+    if (inCode) { code.push(line); continue; }
+    if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
+    if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
+      closeList(); const headers = exportTableCells(line); index += 2; const rows = [];
+      while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(exportTableCells(lines[index])); index++; }
+      index--; out.push(`<div class="table-wrap"><table><thead><tr>${headers.map(cell => `<th>${exportInlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cell) => `<td>${exportInlineMarkdown(row[cell] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/); const unordered = line.match(/^[-*+]\s+(.+)$/); const ordered = line.match(/^\d+\.\s+(.+)$/);
+    if (heading) { closeList(); const level = heading[1].length; out.push(`<h${level}>${exportInlineMarkdown(heading[2])}</h${level}>`); continue; }
+    if (unordered || ordered) { const type = ordered ? 'ol' : 'ul'; if (list && list !== type) closeList(); if (!list) { list = type; out.push(`<${type}>`); } out.push(`<li>${exportInlineMarkdown((unordered || ordered)[1])}</li>`); continue; }
+    closeList(); out.push(line ? `<p>${exportInlineMarkdown(line)}</p>` : '<div class="spacer"></div>');
+  }
+  closeList(); if (inCode) out.push(`<pre><code>${escapeExportHtml(code.join('\n'))}</code></pre>`); return out.join('');
+}
 function exportTimestamp(value) { try { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)); } catch { return String(value || ''); } }
 function conversationExportHtml(events) {
   const messages = events.map(event => {
     const role = event.kind === 'assistant' ? 'Agent' : 'User';
     const attachments = (event.attachments || []).length ? `<p class="attachments">Attachments: ${(event.attachments || []).map(item => escapeExportHtml(item.name || item.path)).join(', ')}</p>` : '';
     const sources = (event.sources || []).length ? `<p class="sources">Sources: ${(event.sources || []).map(item => `<a href="${escapeExportHtml(item.url)}">${escapeExportHtml(item.title || item.url)}</a>`).join(' · ')}</p>` : '';
-    return `<article class="message ${event.kind === 'assistant' ? 'assistant' : 'user'}"><header><strong>${role}</strong><time>${escapeExportHtml(exportTimestamp(event.createdAt))}</time></header><pre>${escapeExportHtml(event.text)}</pre>${attachments}${sources}</article>`;
+    return `<article class="message ${event.kind === 'assistant' ? 'assistant' : 'user'}"><header><strong>${role}</strong><time>${escapeExportHtml(exportTimestamp(event.createdAt))}</time></header><div class="markdown">${exportMarkdown(event.text)}</div>${attachments}${sources}</article>`;
   }).join('\n');
-  return `<!doctype html><html><head><meta charset="UTF-8"><title>Ollama Agent Conversation</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;color:#1f2328;font-size:10.5pt;line-height:1.45}h1{font-size:18pt;margin:0 0 4px}.meta{margin:0 0 18px;color:#57606a}.message{break-inside:avoid;margin:0 0 12px;padding:10px 12px;border:1px solid #d0d7de;border-radius:7px}.message.user{margin-left:12%;background:#eaf3ff;border-color:#b6d4fe}.message.assistant{margin-right:5%;background:#fff}.message header{display:flex;justify-content:space-between;gap:16px;margin-bottom:7px}.message time,.attachments,.sources{color:#57606a;font-size:9pt}.message pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:9.5pt/1.45 Consolas,'Courier New',monospace}.attachments,.sources{margin:8px 0 0}.sources a{color:#0969da;text-decoration:none}</style></head><body><h1>Ollama Agent Conversation</h1><p class="meta">Exported locally on ${escapeExportHtml(exportTimestamp(new Date()))}</p>${messages}</body></html>`;
+  return `<!doctype html><html><head><meta charset="UTF-8"><title>Ollama Agent Conversation</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;color:#1f2328;font-size:10.5pt;line-height:1.5}h1{font-size:18pt;margin:0 0 4px}.meta{margin:0 0 18px;color:#57606a}.message{break-inside:avoid;margin:0 0 12px;padding:12px 14px;border:1px solid #d0d7de;border-radius:8px}.message.user{margin-left:12%;background:#eaf3ff;border-color:#b6d4fe}.message.assistant{margin-right:5%;background:#fff}.message header{display:flex;justify-content:space-between;gap:16px;margin-bottom:8px}.message time,.attachments,.sources{color:#57606a;font-size:9pt}.markdown p{margin:0 0 7px}.markdown h1,.markdown h2,.markdown h3{margin:14px 0 7px;line-height:1.25}.markdown h1{font-size:15pt}.markdown h2{font-size:13pt}.markdown h3{font-size:11pt}.markdown ul,.markdown ol{margin:5px 0 8px;padding-left:22px}.markdown pre{break-inside:avoid;margin:8px 0;padding:9px 10px;overflow-wrap:anywhere;white-space:pre-wrap;color:#24292f;background:#f6f8fa;border:1px solid #d0d7de;border-radius:5px;font:9pt/1.45 Consolas,'Courier New',monospace}.markdown code{padding:1px 3px;background:#f6f8fa;border-radius:3px;font-family:Consolas,'Courier New',monospace}.markdown pre code{padding:0;background:transparent}.markdown hr{border:0;border-top:1px solid #d0d7de;margin:13px 0}.markdown .spacer{height:5px}.table-wrap{overflow:hidden;margin:8px 0;border:1px solid #d0d7de;border-radius:5px}.markdown table{width:100%;border-collapse:collapse;font-size:9pt}.markdown th,.markdown td{padding:5px 7px;text-align:left;vertical-align:top;border-right:1px solid #d0d7de;border-bottom:1px solid #d0d7de}.markdown th:last-child,.markdown td:last-child{border-right:0}.markdown tr:last-child td{border-bottom:0}.markdown th{background:#f6f8fa}.attachments,.sources{margin:8px 0 0}.sources a{color:#0969da;text-decoration:none}</style></head><body><h1>Ollama Agent Conversation</h1><p class="meta">Exported locally on ${escapeExportHtml(exportTimestamp(new Date()))}</p>${messages}</body></html>`;
 }
 function pdfBrowserExecutable() {
   const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA].filter(Boolean);

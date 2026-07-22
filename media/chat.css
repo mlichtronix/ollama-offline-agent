@@ -10,6 +10,7 @@ body { margin: 0; display: flex; flex-direction: column; font-family: var(--vsco
 .assistant pre { white-space: pre-wrap; overflow: auto; padding: 9px; background: var(--vscode-textCodeBlock-background); border-radius: 4px; }
 .assistant code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background); padding: 1px 3px; border-radius: 3px; }
 .assistant h1,.assistant h2,.assistant h3 { margin: .35em 0; }.assistant ul,.assistant ol { margin: .45em 0; padding-left: 1.45em; }
+.message hr { margin: .8em 0; border: 0; border-top: 1px solid var(--vscode-widget-border); }
 .assistant a { color: var(--vscode-textLink-foreground); }.user { align-self: flex-end; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 .message table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; }.message th,.message td { padding: 4px 7px; text-align: left; border: 1px solid var(--vscode-widget-border); white-space: nowrap; }.message th { background: var(--vscode-textCodeBlock-background); }
 .user pre { white-space: pre-wrap; overflow: auto; padding: 7px; color: var(--vscode-editor-foreground); background: var(--vscode-textCodeBlock-background); border: 1px solid var(--vscode-widget-border); border-radius: 4px; }

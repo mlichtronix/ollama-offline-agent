@@ -162,6 +162,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function waitForPdfOutput\(/);
   assert.match(chatSource, /checkCheckSvg/);
   assert.match(chatSource, /taskUi = undefined; renderTaskUi\(\)/);
+  assert.match(chatSource, /out\.push\('<hr>'\)/);
+  assert.match(source, /function exportMarkdown\(/);
+  assert.match(source, /exportMarkdown\(event\.text\)/);
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);

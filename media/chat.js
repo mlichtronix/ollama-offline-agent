@@ -114,6 +114,7 @@ function markdown(value) {
     const line = lines[index];
     if (line.startsWith('```')) { closeList(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
+    if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
       closeList(); const headers = tableCells(line); const markdownRows = [line, lines[index + 1]]; index += 2; const rows = [];
       while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(tableCells(lines[index])); markdownRows.push(lines[index]); index++; }
