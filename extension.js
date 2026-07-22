@@ -205,7 +205,40 @@ async function checkWorkers() {
 function workerFindingsContext(results) {
   const completed = results.filter(item => item.text);
   if (!completed.length) return '';
-  return `\n\nIndependent read-only worker findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting:\n${completed.map(item => `\n[${item.worker.name} — ${item.worker.model}]\n${truncate(item.text, 5000)}`).join('\n')}`;
+  return `\n\nDelegated expert findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting:\n${completed.map(item => `\n[${item.worker.name} — assigned: ${item.task}]\n${truncate(item.text, 5000)}`).join('\n')}`;
+}
+function fallbackWorkerPlan(workers) {
+  const specialities = [
+    ['workspace analyst', 'Inspect the workspace and identify the smallest set of relevant files, current architecture, and concrete implementation risks. Do not propose edits.'],
+    ['test and quality specialist', 'Inspect existing tests, build scripts, and likely verification path. Identify edge cases and specific tests the master should run or add.'],
+    ['security reviewer', 'Review the relevant implementation and configuration paths for security, privacy, reliability, and compatibility risks. Report only evidence-backed findings.'],
+    ['domain researcher', 'Search relevant chat history and, when enabled, authoritative public sources for requirements, constraints, APIs, or domain facts needed for this task.']
+  ];
+  return { masterFocus: 'Own implementation, integration, and validation. Use delegated evidence to avoid repeating independent research.', assignments: workers.map((worker, index) => ({ workerId: worker.id, role: specialities[index % specialities.length][0], task: specialities[index % specialities.length][1] })) };
+}
+function parseDelegationPlan(content, workers) {
+  const text = String(content || '').replace(/```(?:json)?/gi, '').replace(/```/g, '').trim(); const candidate = text.match(/\{[\s\S]*\}/)?.[0];
+  if (!candidate) return undefined;
+  try {
+    const value = JSON.parse(candidate); const allowed = new Set(workers.map(worker => worker.id)); const used = new Set();
+    const assignments = (Array.isArray(value.assignments) ? value.assignments : []).map(item => ({ workerId: String(item.workerId || ''), role: String(item.role || 'specialist').trim(), task: String(item.task || '').trim() })).filter(item => allowed.has(item.workerId) && !used.has(item.workerId) && item.task).filter(item => (used.add(item.workerId), true)).slice(0, workers.length);
+    if (!assignments.length) return undefined;
+    return { masterFocus: truncate(String(value.masterFocus || 'Implement, integrate, and validate the requested change.').trim(), 1200), assignments };
+  } catch { return undefined; }
+}
+async function planWorkerAssignments(task, workers, lastAssistant) {
+  const fallback = fallbackWorkerPlan(workers);
+  const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}`).join('\n');
+  const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Do not assign generic duplication, implementation, commands, writes, or Git mutations. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"..."}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
+  const controller = new AbortController(); activeAbortController = controller;
+  try {
+    const response = await ollama.chat({ model: await configuredModel(), messages: [{ role: 'system', content: plannerSystem }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], tools: [], temperature: 0.1, contextWindow: Number(config().get('contextWindow', 0)), signal: controller.signal, onThinkingUnsupported: model => log(`Planner model ${model} does not support thinking; continuing without it.`) });
+    return parseDelegationPlan(response.message?.content, workers) || fallback;
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    log(`Worker planner failed (${error.message}); using distinct fallback specialist roles.`);
+    return fallback;
+  } finally { if (activeAbortController === controller) activeAbortController = undefined; }
 }
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
@@ -461,11 +494,17 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let workerContext = '';
   if (!continuationMessages && configuredWorkers().some(worker => worker.enabled)) {
     log('Checking configured read-only workers before starting the master task.');
-    const dispatch = await workerPool.delegate(taskWithResources, { language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
-    for (const worker of dispatch.health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
-    for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed an independent analysis.` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
-    postUi('workerHealth', { workers: dispatch.health });
-    workerContext = workerFindingsContext(dispatch.results);
+    const health = await workerPool.health(); const available = health.filter(worker => worker.status === 'available');
+    for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
+    if (available.length) {
+      log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
+      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant);
+      for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
+      const dispatch = await workerPool.delegate(taskWithResources, { health, assignments: plan.assignments, language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
+      for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
+      workerContext = `\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it.` + workerFindingsContext(dispatch.results);
+    }
+    postUi('workerHealth', { workers: health });
   }
   const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);

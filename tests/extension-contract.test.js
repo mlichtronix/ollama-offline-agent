@@ -87,6 +87,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /Queue follow-up/);
   assert.match(source, /workerToolNames/);
   assert.match(source, /executeWorkerTool/);
+  assert.match(source, /planWorkerAssignments/);
+  assert.match(source, /Planning distinct expert assignments/);
+  assert.match(source, /fallbackWorkerPlan/);
   assert.match(source, /workerTokenKey/);
   assert.match(source, /setWorkerToken/);
   assert.match(source, /loadWorkerModels/);

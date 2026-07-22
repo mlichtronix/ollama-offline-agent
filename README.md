@@ -63,13 +63,15 @@ While a response is running, an empty composer shows **Stop**. With text in the 
 
 Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, an optional Bearer token, and an enabled state. Tokens are stored per worker in VS Code Secret Storage. Load the models installed on a worker into the model picker, or enter a custom `model:tag`. The **Check** action verifies availability without starting a task.
 
-Before a new master task starts, enabled workers are checked in parallel. Each available worker receives the task and can independently use only these tools through the master host:
+Before a new master task starts, enabled workers are checked in parallel. The master then creates a delegation plan: each available worker is assigned a distinct expert role and non-overlapping read-only subtask, while the master retains implementation, integration, and verification. Assignments and results are written to the Output channel.
+
+Each available expert can use only these tools through the master host:
 
 - Search and read the local chat history.
 - List, search, and read files in the open workspace.
 - Search and retrieve public web pages when the shared **Globe** setting is enabled.
 
-Workers cannot write files, run shell commands, change Git state, install software, or access attachments as image pixels. Their findings are returned to the master as unverified research; the master must inspect the relevant evidence and performs all edits and tests. Worker endpoints therefore receive the task, any history or workspace excerpts selected by the worker, and enabled public-web results. Configure only servers you trust.
+Workers cannot write files, run shell commands, change Git state, install software, or access attachments as image pixels. Their findings are returned to the master as unverified research; the master must inspect the relevant evidence and performs all edits and tests. Worker endpoints therefore receive the task, their assigned subtask, any history or workspace excerpts selected by the worker, and enabled public-web results. Configure only servers you trust.
 
 ## Access Modes
 
