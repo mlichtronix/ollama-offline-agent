@@ -87,6 +87,8 @@ test('webview controls do not reference removed header actions', () => {
   assert.match(source, /Shift\+drop/);
   assert.match(chatSource, /data-remove-attachment/);
   assert.match(source, /function cancelResource/);
+  assert.match(chatSource, /function openImageViewer/);
+  assert.match(chatSource, /imageViewer/);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {
