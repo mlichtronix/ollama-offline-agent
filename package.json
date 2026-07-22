@@ -14,9 +14,9 @@
     "onCommand:ollamaOffline.openSkills",
     "onCommand:ollamaOffline.newChat",
     "onCommand:ollamaOffline.about",
-    "onCommand:ollamaOffline.openChatEditor"
-    ,"onCommand:ollamaOffline.moveChatToSecondarySidebar"
-    ,"onView:ollamaOffline.chat"
+    "onCommand:ollamaOffline.openChatEditor",
+    "onCommand:ollamaOffline.moveChatToSecondarySidebar",
+    "onView:ollamaOffline.chat"
   ],
   "main": "./extension.js",
   "contributes": {
