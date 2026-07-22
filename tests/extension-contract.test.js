@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
-const { normalizeWorkers, normalizeWorkerReport, workerReportMarkdown } = require('../lib/worker-pool');
+const { normalizeWorkers, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
@@ -53,6 +53,7 @@ test('worker reports preserve structured claims and distinguish host-fetched evi
   assert.equal(report.findings[1].confidence, 'unverified');
   assert.match(workerReportMarkdown(report), /Host-fetched evidence/);
   assert.match(workerReportMarkdown(report), /Host evidence audit/);
+  assert.deepEqual(reportRepairReasons(report), ['a claim was labelled verified without a source fetched through the host']);
 });
 
 test('chat store persists UTF-8 history and matching conversation context', async () => {
