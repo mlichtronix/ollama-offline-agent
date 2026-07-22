@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
+const { normalizeWorkers } = require('../lib/worker-pool');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
@@ -24,6 +25,15 @@ test('Ollama client normalizes endpoints and sends scoped bearer authorization',
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test('worker definitions accept only complete HTTP read-only endpoints', () => {
+  const workers = normalizeWorkers([
+    { id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434/', model: 'qwen3:8b' },
+    { id: 'bad', name: 'Bad', endpoint: 'file:///tmp/ollama', model: 'qwen3:8b' },
+    { id: 'missing-model', name: 'Incomplete', endpoint: 'http://192.168.1.21:11434' }
+  ]);
+  assert.deepEqual(workers, [{ id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434', model: 'qwen3:8b', enabled: true }]);
 });
 
 test('chat store persists UTF-8 history and matching conversation context', async () => {
@@ -75,6 +85,10 @@ test('Ollama context and streaming remain configured', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
+  assert.match(source, /workerToolNames/);
+  assert.match(source, /executeWorkerTool/);
+  assert.match(chatSource, /serverPlusSvg/);
+  assert.match(chatSource, /workersMenu/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {

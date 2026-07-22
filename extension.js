@@ -7,6 +7,7 @@ const path = require('path');
 const cp = require('child_process');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('./lib/ollama-client');
 const { ChatStore } = require('./lib/chat-store');
+const { WorkerPool, normalizeWorkers } = require('./lib/worker-pool');
 
 let cancelled = false;
 let running = false;
@@ -41,6 +42,7 @@ const ollama = new OllamaClient({
     return endpointToken && endpointTokenFor === endpoint ? `Bearer ${endpointToken}` : '';
   }
 });
+const workerPool = new WorkerPool({ getWorkers: () => config().get('workers', []), log });
 function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
 const chatStore = new ChatStore({ getWorkspace: root, createId: messageId, onError: log });
 const chatHistory = chatStore.history;
@@ -159,6 +161,22 @@ function rejectDangerousCommand(command) {
 function isPrivateWebHost(host) { const value = String(host || '').toLowerCase(); if (!value || value === 'localhost' || value.endsWith('.local') || value === '::1') return true; const parts = value.split('.').map(Number); if (parts.length !== 4 || parts.some(Number.isNaN)) return false; return parts[0] === 0 || parts[0] === 10 || parts[0] === 127 || (parts[0] === 169 && parts[1] === 254) || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 192 && parts[1] === 168) || (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127); }
 function safeWebUrl(value) { const url = new URL(String(value || '')); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || isPrivateWebHost(url.hostname)) throw new Error('Only public HTTP(S) web addresses are allowed.'); return url; }
 function webEnabled() { return config().get('webEnabled', false); }
+function configuredWorkers() { return normalizeWorkers(config().get('workers', [])); }
+async function setWorkers(value) {
+  await config().update('workers', normalizeWorkers(value), vscode.ConfigurationTarget.Global);
+  await publishSettings();
+}
+async function checkWorkers() {
+  const health = await workerPool.health();
+  for (const worker of health) log(`Worker ${worker.name} (${worker.endpoint}): ${worker.status}${worker.version ? `, Ollama ${worker.version}` : worker.error ? ` (${worker.error})` : ''}`);
+  postUi('workerHealth', { workers: health });
+  return health;
+}
+function workerFindingsContext(results) {
+  const completed = results.filter(item => item.text);
+  if (!completed.length) return '';
+  return `\n\nIndependent read-only worker findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting:\n${completed.map(item => `\n[${item.worker.name} — ${item.worker.model}]\n${truncate(item.text, 5000)}`).join('\n')}`;
+}
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
 async function rememberWebSource(url, title) { try { const target = safeWebUrl(url); const existing = activeWebSources.find(item => item.url === target.toString()); if (existing) return existing; const source = { title: title || target.hostname, url: target.toString(), favicon: '' }; activeWebSources.push(source); try { const response = await fetch(new URL('/favicon.ico', target), { redirect: 'error', headers: { Accept: 'image/*', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); const data = Buffer.from(await response.arrayBuffer()); const type = response.headers.get('content-type') || 'image/x-icon'; if (response.ok && data.length && data.length <= 64 * 1024 && /^image\//i.test(type)) source.favicon = `data:${type};base64,${data.toString('base64')}`; } catch {} return source; } catch { return undefined; } }
@@ -234,6 +252,8 @@ const tools = [
   { type: 'function', function: { name: 'git_log', description: 'Read recent Git commits. No changes are made.', parameters: { type: 'object', properties: { count: { type: 'number', minimum: 1, maximum: 50 } } } } },
   { type: 'function', function: { name: 'save_skill', description: 'Save a reusable local playbook as Markdown guidance for future tasks. This does not add tools or system permissions. Requires user approval.', parameters: { type: 'object', properties: { name: { type: 'string' }, instructions: { type: 'string' } }, required: ['name', 'instructions'] } } }
 ];
+const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch']);
+const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name));
 
 async function filesRecursive(dir, base, result) {
   const ignored = new Set(['.git', '.ollama-agent', 'node_modules', '.next', 'dist', 'build', '.venv', '__pycache__']);
@@ -300,6 +320,10 @@ async function executeTool(call) {
     }
     return `Unknown tool: ${call.function.name}`;
   } catch (error) { return `Tool error: ${error.message}`; }
+}
+async function executeWorkerTool(call) {
+  if (!workerToolNames.has(call?.function?.name)) return `Blocked: ${call?.function?.name || 'unknown'} is not available to read-only workers.`;
+  return executeTool(call);
 }
 function runCommand(command, requestedCwd) {
   const configuredTimeout = config().get('commandTimeoutSeconds', 0);
@@ -404,7 +428,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  let workerContext = '';
+  if (!continuationMessages && configuredWorkers().some(worker => worker.enabled)) {
+    log('Checking configured read-only workers before starting the master task.');
+    const dispatch = await workerPool.delegate(taskWithResources, { language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
+    for (const worker of dispatch.health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
+    for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed an independent analysis.` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
+    postUi('workerHealth', { workers: dispatch.health });
+    workerContext = workerFindingsContext(dispatch.results);
+  }
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
@@ -484,7 +517,7 @@ async function publishSettings(view = chatView) {
   catch (error) { endpointStatus = 'unavailable'; log(`Could not list models from ${endpointBase()}: ${error.message}`); }
   const selected = config().get('model') || models[0]?.name || '';
   if (!config().get('model') && selected) await config().update('model', selected, vscode.ConfigurationTarget.Global);
-  void view.webview.postMessage({ type: 'settings', mode: config().get('accessMode', 'workspace'), model: selected, language: configuredLanguage === 'auto' ? vscode.env.language : configuredLanguage, languageAuto: configuredLanguage === 'auto', webEnabled: webEnabled(), temperature: config().get('temperature', 0.2), contextWindow: config().get('contextWindow', 0), endpoint: endpointBase(), endpointStatus, hasEndpointToken: Boolean(endpointToken && endpointTokenFor === endpointBase()), models });
+  void view.webview.postMessage({ type: 'settings', mode: config().get('accessMode', 'workspace'), model: selected, language: configuredLanguage === 'auto' ? vscode.env.language : configuredLanguage, languageAuto: configuredLanguage === 'auto', webEnabled: webEnabled(), temperature: config().get('temperature', 0.2), contextWindow: config().get('contextWindow', 0), endpoint: endpointBase(), endpointStatus, hasEndpointToken: Boolean(endpointToken && endpointTokenFor === endpointBase()), models, workers: configuredWorkers() });
 }
 async function setModel(name) {
   try {
@@ -585,6 +618,8 @@ class OfflineChatViewProvider {
       if (message.type === 'setAccessMode') setAccessMode(String(message.mode || ''));
       if (message.type === 'setLanguage') setLanguage(String(message.language || 'auto'));
       if (message.type === 'setWebEnabled') setWebEnabled(Boolean(message.enabled));
+      if (message.type === 'setWorkers') setWorkers(message.workers);
+      if (message.type === 'checkWorkers') checkWorkers();
       if (message.type === 'setGeneration') setGenerationSettings(message.temperature, message.contextWindow);
       if (message.type === 'setEndpoint') setEndpoint(message.endpoint, message.token, Boolean(message.clearToken));
       if (message.type === 'pullModel') pullModel(message.model);
