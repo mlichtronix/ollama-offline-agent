@@ -256,6 +256,14 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /selectedExcerpt/);
   assert.match(chatSource, /getFullYear\(\).*getMonth\(\).*getSeconds\(\)/s);
   assert.match(chatSource, /renderAbout/);
+  assert.match(chatSource, /globalThis\.hljs/);
+  assert.match(chatSource, /languageAliases/);
+  assert.doesNotMatch(chatSource, /lang === 'lua'/);
+  assert.match(source, /highlight\.min\.js/);
+  assert.match(chatStyles, /\.hljs-keyword/);
+  const highlighter = require(path.join(__dirname, '..', 'media', 'highlight.min.js'));
+  for (const language of ['lua', 'python', 'csharp', 'cpp', 'powershell', 'yaml']) assert.equal(Boolean(highlighter.getLanguage(language)), true);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'HIGHLIGHTJS-LICENSE'), 'utf8'), /BSD/);
   assert.match(chatStyles, /\.composer-actions\s*\{\s*display:\s*flex/);
 });
 

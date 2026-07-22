@@ -85,10 +85,14 @@ function tableCells(line) {
   for (let index = 0; index < source.length; index++) { const char = source[index]; if (char === '\\' && source[index + 1] === '|') { cell += '|'; index++; continue; } if (char === '`') inCode = !inCode; if (char === '|' && !inCode) { cells.push(cell.trim()); cell = ''; } else cell += char; }
   cells.push(cell.trim()); return cells;
 }
+const languageAliases = { 'c#': 'csharp', cs: 'csharp', 'c++': 'cpp', cxx: 'cpp', hpp: 'cpp', py: 'python', js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', sh: 'bash', shell: 'bash', pwsh: 'powershell', ps1: 'powershell', yml: 'yaml', html: 'xml', svg: 'xml', md: 'markdown', text: 'plaintext', plain: 'plaintext' };
+function normalizeCodeLanguage(language) { const requested = String(language || '').trim().toLowerCase(); return languageAliases[requested] || requested; }
 function highlightCode(source, language) {
-  const code = escapeHtml(source); const lang = String(language || '').toLowerCase();
-  const keywords = lang === 'lua' ? /\b(?:and|break|do|else|elseif|end|false|for|function|if|in|local|nil|not|or|repeat|return|then|true|until|while)\b/g : lang === 'javascript' || lang === 'js' || lang === 'typescript' || lang === 'ts' ? /\b(?:async|await|const|class|else|export|false|for|function|if|import|let|new|null|return|true|undefined|while)\b/g : lang === 'python' || lang === 'py' ? /\b(?:and|as|class|def|elif|else|False|for|from|if|import|in|None|not|or|return|True|while)\b/g : /$^/g;
-  return code.replace(/(--[^\n]*|\/\/[^\n]*|#[^\n]*|&quot;(?:[^&]|&(?!quot;))*?&quot;|&#39;(?:[^&]|&(?!#39;))*?&#39;|\b\d+(?:\.\d+)?\b)/g, token => token.startsWith('--') || token.startsWith('//') || token.startsWith('#') ? `<span class="tok-comment">${token}</span>` : token.startsWith('&') ? `<span class="tok-string">${token}</span>` : `<span class="tok-number">${token}</span>`).replace(keywords, '<span class="tok-keyword">$&</span>');
+  const normalized = normalizeCodeLanguage(language);
+  if (normalized && globalThis.hljs?.getLanguage(normalized)) {
+    try { return globalThis.hljs.highlight(String(source), { language: normalized, ignoreIllegals: true }).value; } catch {}
+  }
+  return escapeHtml(source);
 }
 function markdown(value) {
   const lines = String(value).replace(/\r/g, '').split('\n');
@@ -96,7 +100,7 @@ function markdown(value) {
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre class="language-${escapeHtml(codeLanguage || 'plain')}"><code>${highlightCode(code.join('\n'), codeLanguage)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
+    if (line.startsWith('```')) { closeList(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
       closeList(); const headers = tableCells(line); const markdownRows = [line, lines[index + 1]]; index += 2; const rows = [];
@@ -108,7 +112,7 @@ function markdown(value) {
     if (unordered || ordered) { const type = ordered ? 'ol' : 'ul'; if (list && list !== type) closeList(); if (!list) { list = type; out.push(`<${type}>`); } out.push(`<li>${inlineMarkdown((unordered || ordered)[1])}</li>`); continue; }
     closeList(); out.push(line ? `<div>${inlineMarkdown(line)}</div>` : '<br>');
   }
-  closeList(); if (inCode) out.push(`<pre class="language-${escapeHtml(codeLanguage || 'plain')}"><code>${highlightCode(code.join('\n'), codeLanguage)}</code></pre>`); return out.join('');
+  closeList(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); } return out.join('');
 }
 function attachmentMarkup(items, temporary = false) {
   if (!items?.length) return '';
