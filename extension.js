@@ -179,6 +179,23 @@ async function setWorkerToken(id, value, clearToken) {
   else if (clearToken) await extensionSecrets.delete(workerTokenKey(id));
   await publishSettings();
 }
+async function postWorkerModels(id, client) {
+  try { postUi('workerModels', { id, models: await client.listModels() }); }
+  catch (error) { postUi('workerModels', { id, models: [], error: String(error.message || error) }); }
+}
+async function loadWorkerModels(id) {
+  const worker = configuredWorkers().find(item => item.id === id);
+  if (!worker) return;
+  await postWorkerModels(id, workerPool.client(worker));
+}
+async function probeWorkerModels(id, endpoint, token) {
+  let parsed;
+  try { parsed = new URL(String(endpoint || '').trim()); }
+  catch { return postUi('workerModels', { id, models: [], error: 'Enter a valid worker endpoint URL first.' }); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return postUi('workerModels', { id, models: [], error: 'Worker endpoint must be an HTTP(S) URL without embedded credentials.' });
+  const client = new OllamaClient({ getEndpoint: () => normalizeEndpoint(parsed.toString()), getAuthorization: () => String(token || '').trim() ? `Bearer ${String(token).trim()}` : '' });
+  await postWorkerModels(id, client);
+}
 async function checkWorkers() {
   const health = await workerPool.health();
   for (const worker of health) log(`Worker ${worker.name} (${worker.endpoint}): ${worker.status}${worker.version ? `, Ollama ${worker.version}` : worker.error ? ` (${worker.error})` : ''}`);
@@ -634,6 +651,8 @@ class OfflineChatViewProvider {
       if (message.type === 'setWebEnabled') setWebEnabled(Boolean(message.enabled));
       if (message.type === 'setWorkers') setWorkers(message.workers, message.tokens || {});
       if (message.type === 'setWorkerToken') setWorkerToken(String(message.id || ''), message.token, Boolean(message.clearToken));
+      if (message.type === 'loadWorkerModels') loadWorkerModels(String(message.id || ''));
+      if (message.type === 'probeWorkerModels') probeWorkerModels(String(message.id || 'new'), message.endpoint, message.token);
       if (message.type === 'checkWorkers') checkWorkers();
       if (message.type === 'setGeneration') setGenerationSettings(message.temperature, message.contextWindow);
       if (message.type === 'setEndpoint') setEndpoint(message.endpoint, message.token, Boolean(message.clearToken));

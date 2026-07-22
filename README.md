@@ -61,7 +61,7 @@ While a response is running, an empty composer shows **Stop**. With text in the 
 
 ## Read-only Workers
 
-Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, an optional Bearer token, and an enabled state. Tokens are stored per worker in VS Code Secret Storage. The **Check** action verifies availability without starting a task.
+Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, an optional Bearer token, and an enabled state. Tokens are stored per worker in VS Code Secret Storage. Load the models installed on a worker into the model picker, or enter a custom `model:tag`. The **Check** action verifies availability without starting a task.
 
 Before a new master task starts, enabled workers are checked in parallel. Each available worker receives the task and can independently use only these tools through the master host:
 
