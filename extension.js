@@ -28,6 +28,7 @@ let endpointTokenReady = Promise.resolve();
 let pendingSteering;
 let activeAgentMessages;
 const queuedAgentRequests = [];
+let activeWebSources = [];
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
 // the exact in-progress reply after the persisted conversation.
@@ -55,7 +56,8 @@ function log(text) { output.appendLine(text); }
 function postUi(type, data = {}) {
   // Do not send into a webview that has not completed its ready handshake.
   // Its snapshot will include all state accumulated while it was unavailable.
-  if (chatView) void chatProvider?.post(chatView, { type, ...data });
+  const sources = type === 'message' ? (data.sources || []).map(item => ({ ...item, source: true })) : [];
+  if (chatView) void chatProvider?.post(chatView, { type, ...data, ...(sources.length ? { attachments: [...(data.attachments || []), ...sources] } : {}) });
 }
 function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
 function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
@@ -66,7 +68,7 @@ function postChat(kind, text, display = true, id = messageId(), attachments = []
   if (display) postUi('message', event);
 }
 function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const event = chatStore.rememberUser(contextText, visibleText, id, attachments, replyTo); if (!alreadyVisible) postUi('message', event); }
-function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt); postUi('message', event); }
+function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt, activeWebSources); postUi('message', event); }
 function deleteChatMessage(id) {
   if (chatStore.remove(id)) postUi('messageDeleted', { id });
 }
@@ -158,8 +160,9 @@ function safeWebUrl(value) { const url = new URL(String(value || '')); if (!['ht
 function webEnabled() { return config().get('webEnabled', false); }
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
-async function webSearch(query, limit) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const text = String(query || '').trim(); if (!text) return 'Provide a search query.'; const address = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(text)}`; const html = await fetchPublicWeb(address); const results = []; const pattern = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a|class="result__snippet"[^>]*>([\s\S]*?)<\/div/gi; let match; while ((match = pattern.exec(html)) && results.length < Math.max(1, Math.min(10, Number(limit) || 5))) { const href = match[1]; const title = webText(match[2]); const snippet = webText(match[3] || match[4] || ''); if (href && title) results.push(`${title}\n${href}\n${snippet}`); } return results.length ? results.join('\n\n') : 'No search results were parsed.'; }
-async function webFetch(url) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; return truncate(webText(await fetchPublicWeb(safeWebUrl(url))), 14000); }
+function rememberWebSource(url, title) { try { const target = safeWebUrl(url); if (!activeWebSources.some(item => item.url === target.toString())) activeWebSources.push({ title: title || target.hostname, url: target.toString(), favicon: new URL('/favicon.ico', target).toString() }); } catch {} }
+async function webSearch(query, limit) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const text = String(query || '').trim(); if (!text) return 'Provide a search query.'; const address = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(text)}`; rememberWebSource(address, 'DuckDuckGo search'); const html = await fetchPublicWeb(address); const results = []; const pattern = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a|class="result__snippet"[^>]*>([\s\S]*?)<\/div/gi; let match; while ((match = pattern.exec(html)) && results.length < Math.max(1, Math.min(10, Number(limit) || 5))) { const href = match[1]; const title = webText(match[2]); const snippet = webText(match[3] || match[4] || ''); if (href && title) results.push(`${title}\n${href}\n${snippet}`); } return results.length ? results.join('\n\n') : 'No search results were parsed.'; }
+async function webFetch(url) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const target = safeWebUrl(url); rememberWebSource(target, target.hostname); return truncate(webText(await fetchPublicWeb(target)), 14000); }
 function truncate(value, limit = 14000) {
   const text = String(value ?? '');
   return text.length > limit ? text.slice(0, limit) + `\n[truncated at ${limit} characters]` : text;
@@ -375,6 +378,7 @@ function isTestCommand(call) {
 function testFailed(result) { return /^Exit\/error:/m.test(String(result)); }
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
+  activeWebSources = [];
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
   if (!task) return;
@@ -608,7 +612,7 @@ class OfflineChatViewProvider {
   }
   uiEvent(webview, event) {
     const workspace = root();
-    const attachments = (event.attachments || []).map(item => ({ ...item, preview: workspace && String(item.mime || '').startsWith('image/') && item.path ? webview.asWebviewUri(vscode.Uri.file(path.join(workspace, item.path))).toString() : undefined }));
+    const attachments = [...(event.attachments || []).map(item => ({ ...item, preview: workspace && String(item.mime || '').startsWith('image/') && item.path ? webview.asWebviewUri(vscode.Uri.file(path.join(workspace, item.path))).toString() : undefined })), ...(event.sources || []).map(item => ({ ...item, source: true }))];
     return { ...event, attachments };
   }
   renderHtml(webview) {
