@@ -2,8 +2,27 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
+const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
+
+test('Ollama client normalizes endpoints and sends scoped bearer authorization', async () => {
+  assert.equal(normalizeEndpoint(' http://127.0.0.1:11434/// '), 'http://127.0.0.1:11434');
+  assert.equal(isLocalEndpoint('http://127.0.0.1:11434'), true);
+  assert.equal(isLocalEndpoint('https://ollama.example.test'), false);
+  const originalFetch = global.fetch;
+  let request;
+  global.fetch = async (url, init) => { request = { url, init }; return { ok: true }; };
+  try {
+    const client = new OllamaClient({ getEndpoint: () => 'http://server.local:11434/', getAuthorization: async () => 'Bearer test-token' });
+    await client.fetch('/api/tags', { headers: { Accept: 'application/json' } });
+    assert.equal(request.url, 'http://server.local:11434/api/tags');
+    assert.deepEqual(request.init.headers, { Accept: 'application/json', Authorization: 'Bearer test-token' });
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
 
 test('security controls remain present', () => {
   assert.match(source, /realpathSync\.native/);
@@ -15,9 +34,9 @@ test('security controls remain present', () => {
 });
 
 test('Ollama context and streaming remain configured', () => {
-  assert.match(source, /num_ctx/);
-  assert.match(source, /stream: true/);
-  assert.match(source, /api\/chat/);
+  assert.match(ollamaClientSource, /num_ctx/);
+  assert.match(ollamaClientSource, /stream: true/);
+  assert.match(ollamaClientSource, /api\/chat/);
   assert.match(source, /describeExecutionEnvironment/);
   assert.match(source, /configured VS Code integrated-terminal profile/);
   assert.match(source, /search_chat_history/);
@@ -34,8 +53,9 @@ test('Ollama context and streaming remain configured', () => {
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
-  assert.match(source, /function ollamaFetch/);
-  assert.match(source, /Authorization: `Bearer \$\{endpointToken\}`/);
+  assert.match(source, /new OllamaClient/);
+  assert.match(source, /`Bearer \$\{endpointToken\}`/);
+  assert.match(ollamaClientSource, /Authorization: authorization/);
   assert.match(source, /context\.secrets\.get\('ollamaEndpointToken'\)/);
   assert.match(source, /function setEndpoint/);
   assert.match(source, /Use Remote Endpoint/);
@@ -111,5 +131,6 @@ test('the package script derives a unique VSIX version from Git history', () => 
   const packageScript = fs.readFileSync(path.join(__dirname, '..', 'package-vsix.ps1'), 'utf8');
   assert.match(packageScript, /git -C \$root rev-list --count HEAD/);
   assert.match(packageScript, /ollama-offline-agent-\$version\.vsix/);
+  assert.match(packageScript, /Join-Path \$root 'lib'/);
   assert.match(packageScript, /UTF8Encoding\(\$false\)/);
 });

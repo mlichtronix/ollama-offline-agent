@@ -13,6 +13,7 @@ $extension = Join-Path $stage 'extension'
 New-Item -ItemType Directory -Path $extension -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'package.json'), (Join-Path $root 'extension.js'), (Join-Path $root 'README.md'), (Join-Path $root 'extension.vsixmanifest'), (Join-Path $root '[Content_Types].xml') -Destination $extension
 Copy-Item -LiteralPath (Join-Path $root 'media') -Destination $extension -Recurse
+Copy-Item -LiteralPath (Join-Path $root 'lib') -Destination $extension -Recurse
 $packageSource.version = $version
 [System.IO.File]::WriteAllText((Join-Path $extension 'package.json'), ($packageSource | ConvertTo-Json -Depth 32), $utf8NoBom)
 # VS Code expects these two files in the VSIX archive root, not in extension/.

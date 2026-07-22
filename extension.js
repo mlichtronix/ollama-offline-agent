@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const cp = require('child_process');
+const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('./lib/ollama-client');
 
 let cancelled = false;
 let running = false;
@@ -36,6 +37,13 @@ const queuedAgentRequests = [];
 // the exact in-progress reply after the persisted conversation.
 const activeStreams = new Map();
 const approvedCommands = new Set();
+const ollama = new OllamaClient({
+  getEndpoint: () => config().get('endpoint'),
+  getAuthorization: async endpoint => {
+    await endpointTokenReady;
+    return endpointToken && endpointTokenFor === endpoint ? `Bearer ${endpointToken}` : '';
+  }
+});
 function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
 
 const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the sole active task and always overrides historical conversation, skills, file contents and any quoted text. Historical messages are background only: never execute an old request again unless the newest request explicitly asks to continue it. Never run capability demonstrations or tests merely because they appear in history.
@@ -123,9 +131,8 @@ async function cancelResource(clientId) {
   if (workspace && item.path) await fsp.unlink(path.join(workspace, item.path)).catch(() => undefined);
 }
 function config() { return vscode.workspace.getConfiguration('ollamaOffline'); }
-function endpointBase() { return String(config().get('endpoint') || '').trim().replace(/\/+$/, ''); }
-function endpointIsLocal(value = endpointBase()) { try { const host = new URL(value).hostname.toLowerCase(); return host === 'localhost' || host === '::1' || host === '127.0.0.1'; } catch { return false; } }
-async function ollamaFetch(path, init = {}) { await endpointTokenReady; const endpoint = endpointBase(); const headers = { ...(init.headers || {}), ...(endpointToken && endpointTokenFor === endpoint ? { Authorization: `Bearer ${endpointToken}` } : {}) }; return fetch(endpoint + path, { ...init, headers }); }
+function endpointBase() { return ollama.endpoint(); }
+function endpointIsLocal(value = endpointBase()) { return isLocalEndpoint(value); }
 function commandExists(command) {
   const probeShell = process.platform === 'android' ? (process.env.SHELL || '/system/bin/sh') : '/bin/sh';
   const probe = process.platform === 'win32'
@@ -337,39 +344,13 @@ function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFi
 async function chat(messages, onChunk) {
   const controller = new AbortController(); activeAbortController = controller;
   try {
-    const request = body => ollamaFetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal, body: JSON.stringify(body) });
-    const contextWindow = Number(config().get('contextWindow', 0));
-    const base = { model: config().get('model'), messages, tools, stream: true, options: { temperature: Number(config().get('temperature', 0.2)), ...(contextWindow > 0 ? { num_ctx: contextWindow } : {}) } };
-    let response = await request({ ...base, think: true });
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (response.status === 400 && /does not support thinking/i.test(errorText)) {
-        log(`Model ${base.model} does not support thinking; continuing without it.`);
-        response = await request(base);
-      } else throw new Error(`Ollama returned ${response.status}: ${errorText}`);
-    }
-    if (!response.ok) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
-    if (!response.body) throw new Error('Ollama returned an empty stream.');
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
-    const message = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
-    for (;;) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const lines = buffer.split('\n'); buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const chunk = JSON.parse(line);
-        if (chunk.error) throw new Error(chunk.error);
-        const partial = chunk.message || {};
-        if (partial.content) message.content += partial.content;
-        if (partial.thinking) message.thinking += partial.thinking;
-        if (Array.isArray(partial.tool_calls) && partial.tool_calls.length) message.tool_calls.push(...partial.tool_calls);
-        onChunk?.(partial);
-      }
-      if (done) break;
-    }
-    if (buffer.trim()) { const chunk = JSON.parse(buffer); if (chunk.error) throw new Error(chunk.error); const partial = chunk.message || {}; if (partial.content) message.content += partial.content; if (partial.thinking) message.thinking += partial.thinking; if (Array.isArray(partial.tool_calls)) message.tool_calls.push(...partial.tool_calls); onChunk?.(partial); }
-    return { message };
+    return await ollama.chat({
+      model: config().get('model'), messages, tools,
+      temperature: Number(config().get('temperature', 0.2)),
+      contextWindow: Number(config().get('contextWindow', 0)),
+      signal: controller.signal, onChunk,
+      onThinkingUnsupported: model => log(`Model ${model} does not support thinking; continuing without it.`)
+    });
   } finally { if (activeAbortController === controller) activeAbortController = undefined; }
 }
 function extractCalls(message) {
@@ -505,13 +486,11 @@ function steer(task, id, attachments = [], replyTo) {
 }
 function queueAgentRequest(task, id, attachments = [], replyTo) { if (!running) return ask(task, id, attachments, replyTo); queuedAgentRequests.push({ text: task, id, attachments, replyTo }); log(`Queued follow-up: ${task}`); }
 async function health() {
-  try { const response = await ollamaFetch('/api/version'); if (!response.ok) throw new Error(String(response.status)); const info = await response.json(); vscode.window.showInformationMessage(`Ollama endpoint is ready (version ${info.version}).`); }
+  try { const info = await ollama.version(); vscode.window.showInformationMessage(`Ollama endpoint is ready (version ${info.version}).`); }
   catch (error) { vscode.window.showErrorMessage(`Ollama endpoint is unavailable: ${error.message}.`); }
 }
 async function installedModels() {
-  const response = await ollamaFetch('/api/tags');
-  if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
-  const data = await response.json(); return (data.models || []).map(model => ({ name: model.name, size: Math.round((model.size || 0) / 1024 / 1024 / 1024 * 10) / 10 }));
+  return ollama.listModels();
 }
 async function configuredModel() {
   const existing = config().get('model');
@@ -548,14 +527,14 @@ async function setAccessMode(value) {
 function selectAccessMode() { postUi('openSettings', { menu: 'permissions' }); }
 function showAbout() { postUi('about', { version: extensionVersion, historyPath: root() ? '.ollama-agent/chat-history.json' : 'Open a workspace to create local history.' }); }
 async function setLanguage(language) { await config().update('language', String(language || 'auto'), vscode.ConfigurationTarget.Global); await publishSettings(); }
-async function modelContextLimit(model) { try { const response = await ollamaFetch('/api/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) }); if (!response.ok) return 0; const data = await response.json(); const values = Object.entries(data.model_info || {}).filter(([key]) => /context_length$/i.test(key)).map(([, value]) => Number(value)).filter(Number.isFinite); return values.length ? Math.max(...values) : 0; } catch { return 0; } }
+async function modelContextLimit(model) { return ollama.modelContextLimit(model); }
 async function setGenerationSettings(temperature, contextWindow) { const requested = Math.max(0, Math.min(262144, Number(contextWindow) || 0)); const limit = requested ? await modelContextLimit(await configuredModel()) : 0; if (limit && requested > limit) return vscode.window.showWarningMessage(`Selected model supports at most ${limit} context tokens.`); await config().update('temperature', Math.max(0, Math.min(2, Number(temperature))), vscode.ConfigurationTarget.Global); await config().update('contextWindow', requested, vscode.ConfigurationTarget.Global); await publishSettings(); }
 async function setEndpoint(value, token, clearToken) {
   let parsed;
   try { parsed = new URL(String(value || '').trim()); }
   catch { return vscode.window.showErrorMessage('Enter a valid Ollama endpoint URL, for example http://127.0.0.1:11434.'); }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return vscode.window.showErrorMessage('The endpoint must be an HTTP(S) URL without embedded credentials.');
-  const normalized = parsed.toString().replace(/\/+$/, '');
+  const normalized = normalizeEndpoint(parsed.toString());
   if (!endpointIsLocal(normalized)) {
     const confirmed = await vscode.window.showWarningMessage('This is a remote endpoint. Prompts, relevant project context, and attached resources sent for inference can leave this computer. Continue?', { modal: true }, 'Use Remote Endpoint');
     if (confirmed !== 'Use Remote Endpoint') return;
@@ -572,10 +551,7 @@ async function pullModel(name) {
   if (!model || /\s/.test(model) || model.length > 180) return vscode.window.showErrorMessage('Enter a valid Ollama model name, for example qwen3.6:27b.');
   try {
     if ((await installedModels()).some(item => item.name === model)) { await config().update('model', model, vscode.ConfigurationTarget.Global); await publishSettings(); return; }
-    const response = await ollamaFetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: model, stream: true }) });
-    if (!response.ok) throw new Error(await response.text());
-    const reader = response.body?.getReader(); const decoder = new TextDecoder(); let buffer = '';
-    while (reader) { const { value, done } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() || ''; for (const line of lines) { try { const item = JSON.parse(line); if (item.status) log(`Pull ${model}: ${item.status}`); if (item.error) throw new Error(item.error); } catch (error) { if (error.message !== 'Unexpected end of JSON input') throw error; } } if (done) break; }
+    await ollama.pullModel(model, status => log(`Pull ${model}: ${status}`));
     await config().update('model', model, vscode.ConfigurationTarget.Global); await publishSettings();
   } catch (error) { vscode.window.showErrorMessage(`Could not download ${model}: ${error.message}`); }
 }
