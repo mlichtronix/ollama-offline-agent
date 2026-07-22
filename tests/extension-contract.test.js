@@ -97,6 +97,9 @@ test('security controls remain present', () => {
 });
 
 test('Ollama context and streaming remain configured', () => {
+  const packageJson = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8');
+  assert.match(packageJson, /"ollamaOffline\.webEnabled"[^\n]+"default": true/);
+  assert.match(source, /function webEnabled\(\) \{ return config\(\)\.get\('webEnabled', true\); \}/);
   assert.match(ollamaClientSource, /num_ctx/);
   assert.match(ollamaClientSource, /stream: true/);
   assert.match(ollamaClientSource, /format/);
@@ -114,6 +117,8 @@ test('Ollama context and streaming remain configured', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
+  assert.match(source, /class="composer-hint"/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /@media \(max-width: 440px\).*composer-hint/s);
   assert.match(source, /workerToolNames/);
   assert.match(source, /executeWorkerTool/);
   assert.match(source, /planWorkerAssignments/);

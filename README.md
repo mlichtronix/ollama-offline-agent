@@ -54,7 +54,7 @@ The command-line method requires the `code` command to be available in `PATH`. V
 
 Open the [GitHub Releases page](https://github.com/mlichtronix/ollama-offline-agent/releases), download the versioned `.vsix` asset, and use the same VS Code command. This is useful when you need to install or keep a particular version.
 
-Open the **Ollama Agent** view and move it to the Secondary Sidebar if desired. The model menu lists the models installed in the local Ollama instance. Entering a model name and pressing Enter selects an installed model or requests Ollama to download it.
+Open the **Ollama Agent** view. VS Code keeps sidebar placement under the user's control; use **Ollama Offline Agent: Open in Secondary Side Bar…** from the Command Palette to place the chat beside other right-sidebar views. The model menu lists the models installed in the local Ollama instance. Entering a model name and pressing Enter selects an installed model or requests Ollama to download it.
 
 ## Usage
 
@@ -106,9 +106,9 @@ The context setting is passed to the native Ollama API as `options.num_ctx`. Sel
 
 ## Web Access
 
-The extension is offline-first. Public web access is disabled by default and is never required for local coding work.
+The extension is offline-first. Public web access is enabled by default for new installations, but it is never required for local coding work and can be disabled at any time.
 
-Use the **Globe-off** icon in the composer to enable it. Its icon changes to **Globe** when enabled and the preference is stored in VS Code settings. The agent can then use `web_search` and `web_fetch` for public HTTP(S) pages. Localhost, private IP ranges, LAN addresses, `.local` hosts, embedded URL credentials, and non-HTTP(S) schemes are blocked.
+Use the **Globe** icon in the composer to toggle web access. It changes to **Globe-off** when disabled and the preference is stored in VS Code settings. The agent can use `web_search` and `web_fetch` for public HTTP(S) pages while access is enabled. Localhost, private IP ranges, LAN addresses, `.local` hosts, embedded URL credentials, and non-HTTP(S) schemes are blocked.
 
 After a web-assisted answer, the extension shows the consulted sources beneath the message. Favicons are fetched by the extension host and stored as local `data:` images with the message, so they remain available after a reload. If a favicon is unavailable, the source uses a theme-aware globe icon instead. If the network, search provider, or target website fails, the agent should report that limitation rather than fabricate a result.
 
