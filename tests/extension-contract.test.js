@@ -142,6 +142,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /workerSupportsRequirements/);
   assert.match(source, /const workerBenchmarks = new Map\(\)/);
   assert.match(source, /cached\?\.key === key/);
+  assert.match(source, /const needsBenchmark = configuredWorkers\(\)\.some/);
   assert.match(source, /item\.requires\.every\(capability => workerRequirementNames\.has\(capability\)\)/);
   assert.match(ollamaClientSource, /async modelProfile\(model\)/);
   assert.match(ollamaClientSource, /async benchmark\(model\)/);

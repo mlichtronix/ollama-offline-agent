@@ -198,7 +198,8 @@ async function probeWorkerModels(id, endpoint, token) {
   await postWorkerModels(id, client);
 }
 async function checkWorkers({ benchmark = false } = {}) {
-  const health = await workerPool.health({ benchmark });
+  const needsBenchmark = configuredWorkers().some(worker => workerBenchmarks.get(worker.id)?.key !== `${worker.endpoint}|${worker.model}`);
+  const health = await workerPool.health({ benchmark: benchmark || needsBenchmark });
   for (const worker of health) {
     if (!worker.profile) continue;
     const key = `${worker.endpoint}|${worker.model}`;
