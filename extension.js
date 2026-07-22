@@ -72,6 +72,7 @@ function rememberAssistant(text, id = messageId(), createdAt) { const event = ch
 function deleteChatMessage(id) {
   if (chatStore.remove(id)) postUi('messageDeleted', { id });
 }
+function editChatMessage(id) { if (chatStore.removeFrom(id).length) chatProvider?.replay(); }
 async function saveResource(resource) {
   const workspace = root();
   if (!workspace) throw new Error('Open a folder workspace before adding resources.');
@@ -590,6 +591,7 @@ class OfflineChatViewProvider {
       if (message.type === 'resource') saveResource(message).catch(error => postUi('resourceError', { clientId: message.clientId, message: error.message }));
       if (message.type === 'cancelResource') cancelResource(message.clientId);
       if (message.type === 'deleteMessage') deleteChatMessage(message.id);
+      if (message.type === 'editMessage') editChatMessage(message.id);
       if (message.type === 'ready') { this.readyViews.add(view); this.replay(view); }
     });
     view.webview.html = this.html(view.webview);
