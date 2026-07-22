@@ -65,7 +65,7 @@ Use the **Server-plus** control in the composer to add up to eight Ollama worker
 
 Before a new master task starts, enabled workers are checked in parallel. The master then creates a delegation plan: each available worker is assigned a distinct expert role and non-overlapping read-only subtask, while the master retains implementation, integration, and verification. Assignments and results are written to the Output channel. Full worker reports are retained as internal local chat-history records; they do not clutter the chat UI, but the master can retrieve a specific report by its ID when it needs detail beyond the compact handoff.
 
-Each available expert can use only these tools through the master host:
+Each available expert receives an English assignment and produces an English internal report, regardless of the language selected for the chat. The master is the only component that communicates with the user and uses the selected response language. Each expert can use only these tools through the master host:
 
 - Search and read the local chat history.
 - List, search, and read files in the open workspace.

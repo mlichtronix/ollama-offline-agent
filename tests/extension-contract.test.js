@@ -95,6 +95,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /event\.internal/);
   assert.match(source, /Worker delegation is host-managed/);
   assert.match(workerPoolSource, /source whose authority matches the claim/);
+  assert.match(workerPoolSource, /Use English for all reasoning, tool requests, source notes, and the final report/);
+  assert.match(source, /Write masterFocus, role, and task in English/);
+  assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
   assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);
   assert.match(source, /Present REST\/GraphQL-style tradeoffs as conditional analysis/i);
