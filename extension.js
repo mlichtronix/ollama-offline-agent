@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const os = require('os');
 const cp = require('child_process');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('./lib/ollama-client');
 const { ChatStore } = require('./lib/chat-store');
@@ -61,6 +62,51 @@ Work deliberately. First classify the newest request as a direct question, inspe
 The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; optional web search and public web-page retrieval with explicit user approval; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. Web tools are not available without network access and must never be used for private, local, or LAN addresses. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. Never claim you ran a tool you did not call. The host asks the user before writes, commands, web access, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
 
 function log(text) { output.appendLine(text); }
+function escapeExportHtml(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function exportTimestamp(value) { try { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)); } catch { return String(value || ''); } }
+function conversationExportHtml(events) {
+  const messages = events.map(event => {
+    const role = event.kind === 'assistant' ? 'Agent' : 'User';
+    const attachments = (event.attachments || []).length ? `<p class="attachments">Attachments: ${(event.attachments || []).map(item => escapeExportHtml(item.name || item.path)).join(', ')}</p>` : '';
+    const sources = (event.sources || []).length ? `<p class="sources">Sources: ${(event.sources || []).map(item => `<a href="${escapeExportHtml(item.url)}">${escapeExportHtml(item.title || item.url)}</a>`).join(' · ')}</p>` : '';
+    return `<article class="message ${event.kind === 'assistant' ? 'assistant' : 'user'}"><header><strong>${role}</strong><time>${escapeExportHtml(exportTimestamp(event.createdAt))}</time></header><pre>${escapeExportHtml(event.text)}</pre>${attachments}${sources}</article>`;
+  }).join('\n');
+  return `<!doctype html><html><head><meta charset="UTF-8"><title>Ollama Agent Conversation</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;color:#1f2328;font-size:10.5pt;line-height:1.45}h1{font-size:18pt;margin:0 0 4px}.meta{margin:0 0 18px;color:#57606a}.message{break-inside:avoid;margin:0 0 12px;padding:10px 12px;border:1px solid #d0d7de;border-radius:7px}.message.user{margin-left:12%;background:#eaf3ff;border-color:#b6d4fe}.message.assistant{margin-right:5%;background:#fff}.message header{display:flex;justify-content:space-between;gap:16px;margin-bottom:7px}.message time,.attachments,.sources{color:#57606a;font-size:9pt}.message pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:9.5pt/1.45 Consolas,'Courier New',monospace}.attachments,.sources{margin:8px 0 0}.sources a{color:#0969da;text-decoration:none}</style></head><body><h1>Ollama Agent Conversation</h1><p class="meta">Exported locally on ${escapeExportHtml(exportTimestamp(new Date()))}</p>${messages}</body></html>`;
+}
+function pdfBrowserExecutable() {
+  const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA].filter(Boolean);
+  const windows = programFiles.flatMap(base => [path.join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe'), path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe')]);
+  const mac = ['/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+  const linux = ['microsoft-edge', 'google-chrome', 'chromium', 'chromium-browser'];
+  return [...windows, ...mac, ...linux].find(candidate => candidate.includes(path.sep) ? fs.existsSync(candidate) : true);
+}
+function runFile(command, args, options = {}) { return new Promise((resolve, reject) => cp.execFile(command, args, { windowsHide: true, timeout: 60000, ...options }, error => error ? reject(error) : resolve())); }
+async function waitForPdfOutput(file, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs; let lastSize = -1;
+  while (Date.now() < deadline) {
+    try { const stat = await fsp.stat(file); if (stat.size > 100 && stat.size === lastSize) return; lastSize = stat.size; } catch {}
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  throw new Error('The browser did not finish writing the PDF file.');
+}
+async function exportChatPdf() {
+  const events = chatHistory.filter(event => !event.internal);
+  if (!events.length) return vscode.window.showWarningMessage('There is no conversation to export.');
+  const target = await vscode.window.showSaveDialog({ title: 'Export conversation to PDF', saveLabel: 'Export PDF', defaultUri: vscode.Uri.file(path.join(root() || os.homedir(), `ollama-conversation-${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`)), filters: { PDF: ['pdf'] } });
+  if (!target) return;
+  const browser = pdfBrowserExecutable();
+  if (!browser) return vscode.window.showErrorMessage('PDF export requires a locally installed Chromium browser such as Microsoft Edge or Google Chrome.');
+  const temporaryHtml = path.join(os.tmpdir(), `ollama-conversation-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
+  try {
+    await fsp.writeFile(temporaryHtml, conversationExportHtml(events), 'utf8');
+    await runFile(browser, ['--headless=new', '--disable-gpu', '--no-pdf-header-footer', `--print-to-pdf=${target.fsPath}`, vscode.Uri.file(temporaryHtml).toString()]);
+    await waitForPdfOutput(target.fsPath);
+    const action = await vscode.window.showInformationMessage(`Conversation exported to ${path.basename(target.fsPath)}.`, 'Reveal File');
+    if (action === 'Reveal File') await vscode.commands.executeCommand('revealFileInOS', target);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Could not export conversation to PDF: ${error.message}`);
+  } finally { await fsp.unlink(temporaryHtml).catch(() => undefined); }
+}
 function postUi(type, data = {}) {
   // Do not send into a webview that has not completed its ready handshake.
   // Its snapshot will include all state accumulated while it was unavailable.
@@ -847,7 +893,7 @@ async function newChat() {
   if (running) return vscode.window.showWarningMessage('Stop the current agent run before starting a new chat.');
   const confirmed = await vscode.window.showWarningMessage('Clear this workspace chat history? This removes the visible conversation and its local context.', { modal: true }, 'Clear Chat History');
   if (confirmed !== 'Clear Chat History') return;
-  await chatStore.clear(); pendingResources.length = 0; promptStates.clear();
+  await chatStore.clear(); pendingResources.length = 0; promptStates.clear(); activeTaskUi = undefined;
   postUi('historyCleared');
 }
 function openChatEditor() { chatProvider.openInEditor(); }
@@ -891,6 +937,7 @@ class OfflineChatViewProvider {
       if (message.type === 'openTaskDiff' && typeof message.path === 'string') void openTaskFileDiff(message.path);
       if (message.type === 'model') selectModel();
       if (message.type === 'newChat') newChat();
+      if (message.type === 'exportChatPdf') exportChatPdf();
       if (message.type === 'about') showAbout();
       if (message.type === 'permissions') selectAccessMode();
       if (message.type === 'setModel') setModel(String(message.model || ''));
@@ -969,7 +1016,7 @@ function activate(context) {
   skillsDir = path.join(context.globalStorageUri.fsPath, 'skills');
   chatProvider = new OfflineChatViewProvider(context);
   if (root()) void ensureWorkspaceState();
-  context.subscriptions.push(output, vscode.workspace.onDidChangeWorkspaceFolders(() => { if (root()) void ensureWorkspaceState(); }), vscode.window.registerWebviewViewProvider('ollamaOffline.chat', chatProvider), vscode.commands.registerCommand('ollamaOffline.ask', ask), vscode.commands.registerCommand('ollamaOffline.stop', () => { requestStop(); vscode.window.showInformationMessage('Stop requested.'); }), vscode.commands.registerCommand('ollamaOffline.health', health), vscode.commands.registerCommand('ollamaOffline.selectModel', selectModel), vscode.commands.registerCommand('ollamaOffline.openSkills', openSkills), vscode.commands.registerCommand('ollamaOffline.newChat', newChat), vscode.commands.registerCommand('ollamaOffline.about', showAbout), vscode.commands.registerCommand('ollamaOffline.openChatEditor', openChatEditor), vscode.commands.registerCommand('ollamaOffline.moveChatToSecondarySidebar', moveChatToSecondarySidebar));
+  context.subscriptions.push(output, vscode.workspace.onDidChangeWorkspaceFolders(() => { if (root()) void ensureWorkspaceState(); }), vscode.window.registerWebviewViewProvider('ollamaOffline.chat', chatProvider), vscode.commands.registerCommand('ollamaOffline.ask', ask), vscode.commands.registerCommand('ollamaOffline.stop', () => { requestStop(); vscode.window.showInformationMessage('Stop requested.'); }), vscode.commands.registerCommand('ollamaOffline.health', health), vscode.commands.registerCommand('ollamaOffline.selectModel', selectModel), vscode.commands.registerCommand('ollamaOffline.openSkills', openSkills), vscode.commands.registerCommand('ollamaOffline.newChat', newChat), vscode.commands.registerCommand('ollamaOffline.exportChatPdf', exportChatPdf), vscode.commands.registerCommand('ollamaOffline.about', showAbout), vscode.commands.registerCommand('ollamaOffline.openChatEditor', openChatEditor), vscode.commands.registerCommand('ollamaOffline.moveChatToSecondarySidebar', moveChatToSecondarySidebar));
 }
 function deactivate() { requestStop(); }
 module.exports = { activate, deactivate };

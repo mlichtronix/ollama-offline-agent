@@ -157,6 +157,11 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
   assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);
   assert.match(chatSource, /function formatTaskDuration\(/);
+  assert.match(source, /function exportChatPdf\(/);
+  assert.match(source, /--print-to-pdf=/);
+  assert.match(source, /function waitForPdfOutput\(/);
+  assert.match(chatSource, /checkCheckSvg/);
+  assert.match(chatSource, /taskUi = undefined; renderTaskUi\(\)/);
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
