@@ -140,6 +140,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Write masterFocus, role, and task in English/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
+  assert.match(source, /cite a URL as a source only after web_fetch successfully returned that exact page/i);
+  assert.match(source, /const body = await fetchPublicWeb\(target\); await rememberWebSource\(target, target\.hostname\)/);
+  assert.doesNotMatch(source, /await rememberWebSource\(target, target\.hostname\); return truncate\(webText\(await fetchPublicWeb\(target\)\)/);
   assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);
   assert.match(source, /Present REST\/GraphQL-style tradeoffs as conditional analysis/i);
   assert.match(source, /workerTokenKey/);
