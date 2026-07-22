@@ -14,6 +14,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # package-vsix.ps1 derives the VSIX patch version from commit count.
+          # A shallow tag checkout would otherwise package every release as 0.1.1.
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 20
