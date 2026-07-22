@@ -30,6 +30,7 @@ let pendingSteering;
 let activeAgentMessages;
 const queuedAgentRequests = [];
 let activeWebSources = [];
+const workerBenchmarks = new Map();
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
 // the exact in-progress reply after the persisted conversation.
@@ -198,6 +199,13 @@ async function probeWorkerModels(id, endpoint, token) {
 }
 async function checkWorkers({ benchmark = false } = {}) {
   const health = await workerPool.health({ benchmark });
+  for (const worker of health) {
+    if (!worker.profile) continue;
+    const key = `${worker.endpoint}|${worker.model}`;
+    if (benchmark && worker.profile.benchmark) workerBenchmarks.set(worker.id, { key, benchmark: worker.profile.benchmark });
+    const cached = workerBenchmarks.get(worker.id);
+    if (!worker.profile.benchmark && cached?.key === key) worker.profile.benchmark = cached.benchmark;
+  }
   for (const worker of health) { const profile = worker.profile; const speed = profile?.benchmark?.tokensPerSecond ? `, ${profile.benchmark.tokensPerSecond} tok/s` : ''; const capabilities = profile?.capabilities?.length ? `, ${profile.capabilities.join('/')}` : ''; const context = profile?.contextLength ? `, ${Math.round(profile.contextLength / 1024)}K context` : ''; log(`Worker ${worker.name} (${worker.endpoint}): ${worker.status}${worker.version ? `, Ollama ${worker.version}` : worker.error ? ` (${worker.error})` : ''}${capabilities}${context}${speed}${worker.profileError ? ` (profile: ${worker.profileError})` : ''}`); }
   postUi('workerHealth', { workers: health });
   return health;
