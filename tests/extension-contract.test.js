@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
-const { normalizeWorkers, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
+const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
@@ -35,6 +35,12 @@ test('worker definitions accept only complete HTTP read-only endpoints', () => {
     { id: 'missing-model', name: 'Incomplete', endpoint: 'http://192.168.1.21:11434' }
   ]);
   assert.deepEqual(workers, [{ id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434', model: 'qwen3:8b', enabled: true }]);
+});
+
+test('worker preflight requires the configured model on its endpoint', () => {
+  assert.equal(modelAvailable([{ name: 'qwen3:8b' }], 'qwen3:8b'), true);
+  assert.equal(modelAvailable([{ name: 'qwen3:latest' }], 'qwen3'), true);
+  assert.equal(modelAvailable([{ name: 'qwen2.5:7b' }], 'qwen3:8b'), false);
 });
 
 test('worker reports preserve structured claims and distinguish host-fetched evidence', () => {
@@ -115,6 +121,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /delegationReason/);
   assert.match(source, /An explicit user maximum is an upper bound/);
   assert.match(source, /Do not substitute a generic workspace inventory/);
+  assert.match(source, /workerDispatchContext/);
   assert.match(source, /Planning distinct expert assignments/);
   assert.match(source, /fallbackWorkerPlan/);
   assert.match(source, /rememberWorkerReports/);
