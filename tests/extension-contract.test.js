@@ -187,6 +187,10 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /recordTaskFile/);
   assert.match(source, /recordTaskCheck/);
   assert.match(source, /function diffLineStats/);
+  assert.match(source, /function readFileContent/);
+  assert.match(source, /startLine/);
+  assert.match(source, /pattern: \{ type: 'string'/);
+  assert.match(source, /Regex filter rejected/);
   assert.match(source, /function openTaskFileDiff/);
   assert.match(source, /executeCommand\('vscode\.diff'/);
   assert.match(source, /showTextDocument\(document, \{ preview: true \}\)/);
@@ -200,6 +204,8 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatSource, /data-task-diff/);
   assert.match(chatSource, /review-summary/);
   assert.match(chatSource, /<details class="review-checks"/);
+  assert.match(chatSource, /const undoSvg/);
+  assert.match(chatSource, /class="task-undo"/);
   assert.match(chatStyles, /\.task-panel/);
   assert.match(chatStyles, /\.task-review/);
 });

@@ -355,6 +355,20 @@ function truncate(value, limit = 14000) {
   const text = String(value ?? '');
   return text.length > limit ? text.slice(0, limit) + `\n[truncated at ${limit} characters]` : text;
 }
+function readFileContent(content, startLine, endLine, pattern, flags = '') {
+  if (startLine === undefined && endLine === undefined && (pattern === undefined || pattern === '')) return truncate(content);
+  const lines = String(content).split(/\r?\n/);
+  const start = Math.max(1, Math.min(lines.length || 1, startLine === undefined ? 1 : Number(startLine) || 1));
+  const end = Math.max(start, Math.min(lines.length || start, endLine === undefined ? lines.length : Number(endLine) || start));
+  const selected = lines.slice(start - 1, end);
+  if (pattern === undefined || pattern === '') return `[lines ${start}-${end} of ${lines.length}]\n${truncate(selected.join('\n'))}`;
+  const expression = String(pattern);
+  if (expression.length > 256 || /\((?:[^()]*[+*][^()]*)+\)[+*{]/.test(expression)) return 'Regex filter rejected: use a shorter expression without nested quantifiers.';
+  let regex;
+  try { regex = new RegExp(expression, String(flags || '').replace(/[^imsu]/g, '')); } catch (error) { return `Invalid regex filter: ${error.message}`; }
+  const matches = selected.map((line, index) => ({ line, number: start + index })).filter(item => item.line.length <= 16000 && regex.test(item.line));
+  return `[${matches.length} matching line${matches.length === 1 ? '' : 's'} in ${start}-${end} of ${lines.length} for /${expression}/${flags}]\n${truncate(matches.map(item => `${item.number}: ${item.line}`).join('\n') || '(no matches)')}`;
+}
 function writePreview(before, after) {
   const oldLines = String(before || '').split(/\r?\n/); const newLines = String(after || '').split(/\r?\n/); let start = 0;
   while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
@@ -432,7 +446,7 @@ const tools = [
   { type: 'function', function: { name: 'search_chat_history', description: 'Search the complete local chat history for relevant earlier messages. Use this before relying on prior conversation; then use read_chat_messages for exact content.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'A semantic search phrase for the needed prior topic or decision.' }, maxResults: { type: 'number', minimum: 1, maximum: 50, description: 'How many candidate messages to return.' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'read_chat_messages', description: 'Read exact earlier chat messages by IDs returned from search_chat_history. Request only messages relevant to the current task.', parameters: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50 } }, required: ['ids'] } } },
   { type: 'function', function: { name: 'list_files', description: 'List files recursively. Paths are workspace-relative; guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { directory: { type: 'string' } } } } },
-  { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file. Guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+  { type: 'function', function: { name: 'read_file', description: 'Read a UTF-8 text file or an inclusive line range. Optionally filter the selected range by a regular expression and return matching numbered lines. This read-only tool never requires approval. Guarded system mode also permits absolute paths.', parameters: { type: 'object', properties: { path: { type: 'string' }, startLine: { type: 'number', minimum: 1, description: 'Optional first line, inclusive.' }, endLine: { type: 'number', minimum: 1, description: 'Optional last line, inclusive. Use with startLine for a focused excerpt.' }, pattern: { type: 'string', maxLength: 256, description: 'Optional safe regex filter applied one line at a time.' }, flags: { type: 'string', description: 'Optional regex flags: i, m, s, u.' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
@@ -472,7 +486,7 @@ async function executeTool(call) {
       const dir = resolveTarget(args.directory || '.'); if (isAgentInternal(dir)) return 'Agent internal state is not available as project context.'; const result = []; await filesRecursive(dir, dir, result);
       return truncate(result.sort().join('\n') || '(no files)');
     }
-    if (call.function.name === 'read_file') { const target = resolveTarget(args.path); if (isAgentInternal(target)) return 'Agent internal state is not available as project context.'; if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual inspection outside the agent.'; return truncate(await fsp.readFile(target, 'utf8')); }
+    if (call.function.name === 'read_file') { const target = resolveTarget(args.path); if (isAgentInternal(target)) return 'Agent internal state is not available as project context.'; if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual inspection outside the agent.'; return readFileContent(await fsp.readFile(target, 'utf8'), args.startLine, args.endLine, args.pattern, args.flags); }
     if (call.function.name === 'search_text') {
       const base = resolveTarget(args.directory || '.'); if (isAgentInternal(base)) return 'Agent internal state is not available as project context.'; if (isSensitiveTarget(base)) return 'Blocked by guardrail: sensitive file requires manual inspection outside the agent.'; const files = []; await filesRecursive(base, base, files); const hits = [];
       for (const relative of files) { try { const lines = (await fsp.readFile(path.join(base, relative), 'utf8')).split(/\r?\n/); lines.forEach((line, i) => { if (line.includes(args.query) && hits.length < 100) hits.push(`${relative}:${i + 1}: ${line}`); }); } catch {} }
