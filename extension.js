@@ -28,6 +28,9 @@ let extensionSecrets;
 let endpointToken = '';
 let endpointTokenFor = '';
 let endpointTokenReady = Promise.resolve();
+let pendingSteering;
+let activeAgentMessages;
+const queuedAgentRequests = [];
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
 // the exact in-progress reply after the persisted conversation.
@@ -417,13 +420,13 @@ function isTestCommand(call) {
   try { const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; return /\b(test|tests|pytest|jest|vitest|mocha|ctest|dotnet\s+test|cargo\s+test|go\s+test)\b/i.test(args.command || ''); } catch { return false; }
 }
 function testFailed(result) { return /^Exit\/error:/m.test(String(result)); }
-async function ask(initialTask, providedId, attachments = [], replyTo) {
+async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
   if (!task) return;
   await ensureWorkspaceState();
-  running = true; cancelled = false; approvedCommands.clear(); postUi('runState', { working: true }); output.show(true); log(`\n=== Task: ${task} ===`);
+  running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : 'Task'}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: all paths accessible to the current user and local application installers are allowed after each explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
   const lastAssistant = latestAssistantContext();
@@ -443,7 +446,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo) {
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  const messages = [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) }, ...(lastAssistant ? [lastAssistant] : []), userMessage];
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
@@ -485,10 +488,22 @@ async function ask(initialTask, providedId, attachments = [], replyTo) {
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
       }
     }
-    vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
+    if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
   } catch (error) { if (cancelled && error.name === 'AbortError') { log('Agent generation aborted by user.'); } else { log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } }
-  finally { activeStreams.clear(); running = false; postUi('runState', { working: false }); }
+  finally {
+    const steering = pendingSteering; pendingSteering = undefined;
+    const continuation = activeAgentMessages ? [...activeAgentMessages] : undefined;
+    for (const [id, stream] of activeStreams) { if (steering && stream.text) continuation?.push({ role: 'assistant', content: stream.text }); if (steering) postUi('assistantClear', { id }); }
+    activeStreams.clear(); activeAgentMessages = undefined; running = false; postUi('runState', { working: false });
+    if (steering) await ask(steering.text, steering.id, steering.attachments, steering.replyTo, continuation);
+    else if (queuedAgentRequests.length) { const next = queuedAgentRequests.shift(); await ask(next.text, next.id, next.attachments, next.replyTo); }
+  }
 }
+function steer(task, id, attachments = [], replyTo) {
+  if (!running) return ask(task, id, attachments, replyTo);
+  pendingSteering = { text: task, id, attachments, replyTo }; log(`Steering requested: ${task}`); requestStop();
+}
+function queueAgentRequest(task, id, attachments = [], replyTo) { if (!running) return ask(task, id, attachments, replyTo); queuedAgentRequests.push({ text: task, id, attachments, replyTo }); log(`Queued follow-up: ${task}`); }
 async function health() {
   try { const response = await ollamaFetch('/api/version'); if (!response.ok) throw new Error(String(response.status)); const info = await response.json(); vscode.window.showInformationMessage(`Ollama endpoint is ready (version ${info.version}).`); }
   catch (error) { vscode.window.showErrorMessage(`Ollama endpoint is unavailable: ${error.message}.`); }
@@ -605,6 +620,8 @@ class OfflineChatViewProvider {
     view._ollamaMessageDisposable?.dispose();
     view._ollamaMessageDisposable = view.webview.onDidReceiveMessage(message => {
       if (message.type === 'prompt' && String(message.text || '').trim()) ask(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
+      if (message.type === 'steer' && String(message.text || '').trim()) steer(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
+      if (message.type === 'queue' && String(message.text || '').trim()) queueAgentRequest(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
       if (message.type === 'stop') requestStop();
       if (message.type === 'model') selectModel();
       if (message.type === 'newChat') newChat();
@@ -651,6 +668,7 @@ class OfflineChatViewProvider {
     const brain = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5a3 3 0 0 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 1.842 7.192A4 4 0 0 0 12 20Z"/><path d="M12 5a3 3 0 0 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-1.842 7.192A4 4 0 0 1 12 20Z"/><path d="M12 5v15"/></svg>';
     const arrow = '<svg class="arrow-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>';
     const square = '<svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="10" height="10" x="7" y="7" rx="1"/></svg>';
+    const route = '<svg class="steer-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="19" r="2"/><path d="M9 19h2a4 4 0 0 0 4-4V5"/><path d="m12 8 3-3 3 3"/></svg>';
     const shield = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/></svg>';
     return `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource};"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link rel="stylesheet" href="${styleUri}"></head><body><header class="chat-header"><div><strong>Ollama Agent</strong><span>Local project chat</span></div><div class="header-actions"><button id="new" title="New chat">＋</button><button id="model" title="Select model">${brain}<span>Model</span></button></div></header><main id="chat" aria-live="polite"><div class="status">Ready</div></main><section class="composer"><textarea id="input" placeholder="Ask the agent to inspect, plan, code, or test…" aria-label="Agent prompt"></textarea><div class="composer-actions"><button class="permissions" id="permissions">${shield}<span>Permissions</span></button><span>Enter to send · Shift+Enter for newline</span><button id="submit" class="submit" title="Send">${arrow}${square}</button></div></section><script src="${scriptUri}"></script></body></html>`;
   }
@@ -666,7 +684,7 @@ class OfflineChatViewProvider {
     const initialModel = config().get('model');
     const initialModeLabel = ({ workspace: 'Workspace access', guardedSystem: 'Guarded system access', fullSystem: 'Full system access' })[initialMode] || 'Permissions';
     const initialShield = initialMode === 'guardedSystem' ? '<svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></svg>' : initialMode === 'fullSystem' ? '<svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="M12 8v4M12 16h.01"/></svg>' : shield;
-    return `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; img-src ${webview.cspSource} data:;"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link rel="stylesheet" href="${styleUri}"></head><body><aside id="aboutPanel" class="about-panel" aria-live="polite"></aside><main id="chat" aria-live="polite"><div class="status">Ready</div></main><section class="composer" id="composer"><div id="composerResize" title="Drag to resize prompt"></div><div id="replyContext" class="reply-context"></div><div id="attachments" class="attachments"></div><textarea id="input" placeholder="Ask the agent to inspect, plan, code, or test…" aria-label="Agent prompt"></textarea><input id="resourceInput" type="file" multiple hidden><div class="composer-actions"><div class="setting"><button class="permissions icon-only mode-${initialMode}" id="permissions" title="${initialModeLabel}">${initialShield}</button><div id="permissionsMenu" class="setting-menu"></div></div><div class="setting"><button class="model icon-only" id="model" title="Model: ${initialModel}">${brain}</button><div id="modelMenu" class="setting-menu model-menu"></div></div><button class="attach icon-only" id="attach" title="Attach files or images">${clip}</button><span title="Paste files with Ctrl+V. When dragging from VS Code Explorer, hold Shift while dropping.">Paste files · Shift+drop · Enter</span><div class="setting"><button id="language" class="language" title="Reply language">SK</button><div id="languageMenu" class="setting-menu language-menu"></div></div><button id="submit" class="submit" title="Send">${arrow}${square}</button></div></section><script src="${scriptUri}"></script></body></html>`;
+    return `<!doctype html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; img-src ${webview.cspSource} data:;"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link rel="stylesheet" href="${styleUri}"></head><body><aside id="aboutPanel" class="about-panel" aria-live="polite"></aside><main id="chat" aria-live="polite"><div class="status">Ready</div></main><section class="composer" id="composer"><div id="composerResize" title="Drag to resize prompt"></div><div id="replyContext" class="reply-context"></div><div id="attachments" class="attachments"></div><textarea id="input" placeholder="Ask the agent to inspect, plan, code, or test…" aria-label="Agent prompt"></textarea><input id="resourceInput" type="file" multiple hidden><div class="composer-actions"><div class="setting"><button class="permissions icon-only mode-${initialMode}" id="permissions" title="${initialModeLabel}">${initialShield}</button><div id="permissionsMenu" class="setting-menu"></div></div><div class="setting"><button class="model icon-only" id="model" title="Model: ${initialModel}">${brain}</button><div id="modelMenu" class="setting-menu model-menu"></div></div><button class="attach icon-only" id="attach" title="Attach files or images">${clip}</button><span title="Paste files with Ctrl+V. When dragging from VS Code Explorer, hold Shift while dropping.">Paste files · Shift+drop · Enter</span><div class="setting"><button id="language" class="language" title="Reply language">SK</button><div id="languageMenu" class="setting-menu language-menu"></div></div><button id="submit" class="submit" title="Send">${arrow}${square}${route}</button></div></section><script src="${scriptUri}"></script></body></html>`;
   }
   renderHtml(webview) {
     return this.renderHtmlV2(webview);

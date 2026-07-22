@@ -24,6 +24,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /read_chat_messages/);
   assert.match(source, /most recent assistant answer is always supplied as candidate context/);
   assert.match(source, /latestAssistantContext/);
+  assert.match(source, /function steer\(/);
+  assert.match(source, /function queueAgentRequest/);
+  assert.match(source, /queuedAgentRequests/);
+  const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  assert.match(chatSource, /data-steering-mode/);
+  assert.match(chatSource, /Queue follow-up/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
