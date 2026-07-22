@@ -214,14 +214,14 @@ function rememberWorkerReports(results) {
     result.reportId = chatStore.append('worker', text, { internal: true }).id;
   }
 }
-function fallbackWorkerPlan(workers) {
+function fallbackWorkerPlan(workers, maxTasks) {
   const specialities = [
     ['workspace analyst', 'Inspect the workspace and identify the smallest set of relevant files, current architecture, and concrete implementation risks. Do not propose edits.'],
     ['test and quality specialist', 'Inspect existing tests, build scripts, and likely verification path. Identify edge cases and specific tests the master should run or add.'],
     ['security reviewer', 'Review the relevant implementation and configuration paths for security, privacy, reliability, and compatibility risks. Report only evidence-backed findings.'],
     ['domain researcher', 'Search relevant chat history and, when enabled, authoritative public sources for requirements, constraints, APIs, or domain facts needed for this task.']
   ];
-  return { masterFocus: 'Own implementation, integration, and validation. Use delegated evidence to avoid repeating independent research.', assignments: workers.map((worker, index) => ({ workerId: worker.id, role: specialities[index % specialities.length][0], task: specialities[index % specialities.length][1], dependsOn: [] })) };
+  return { masterFocus: 'Own implementation, integration, and validation. Use delegated evidence to avoid repeating independent research.', assignments: workers.slice(0, maxTasks).map((worker, index) => ({ workerId: worker.id, role: specialities[index % specialities.length][0], task: specialities[index % specialities.length][1], dependsOn: [] })), delegationReason: 'Fallback plan for a complex task.' };
 }
 function hasDependencyCycle(assignments) {
   const map = new Map(assignments.map(item => [item.workerId, item.dependsOn || []]));
@@ -236,14 +236,16 @@ function hasDependencyCycle(assignments) {
   };
   return [...map.keys()].some(visit);
 }
-function parseDelegationPlan(content, workers) {
+function parseDelegationPlan(content, workers, maxTasks) {
   const text = String(content || '').replace(/```(?:json)?/gi, '').replace(/```/g, '').trim(); const candidate = text.match(/\{[\s\S]*\}/)?.[0];
   if (!candidate) return undefined;
   try {
     const value = JSON.parse(candidate); const allowed = new Set(workers.map(worker => worker.id)); const used = new Set();
-    const assignments = (Array.isArray(value.assignments) ? value.assignments : []).map(item => ({ workerId: String(item.workerId || ''), role: String(item.role || 'specialist').trim(), task: String(item.task || '').trim(), dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(id => String(id)).filter(id => allowed.has(id) && id !== String(item.workerId || '')) : [] })).filter(item => allowed.has(item.workerId) && !used.has(item.workerId) && item.task).filter(item => (used.add(item.workerId), true)).slice(0, workers.length);
+    const delegationReason = truncate(String(value.delegationReason || '').trim(), 500);
+    if (value.delegate === false) return { masterFocus: truncate(String(value.masterFocus || 'Answer directly without worker delegation.').trim(), 1200), assignments: [], delegationReason: delegationReason || 'The task is small or does not benefit from independent research.' };
+    const assignments = (Array.isArray(value.assignments) ? value.assignments : []).map(item => ({ workerId: String(item.workerId || ''), role: String(item.role || 'specialist').trim(), task: String(item.task || '').trim(), dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(id => String(id)).filter(id => allowed.has(id) && id !== String(item.workerId || '')) : [] })).filter(item => allowed.has(item.workerId) && !used.has(item.workerId) && item.task).filter(item => (used.add(item.workerId), true)).slice(0, maxTasks);
     if (!assignments.length || hasDependencyCycle(assignments)) return undefined;
-    return { masterFocus: truncate(String(value.masterFocus || 'Implement, integrate, and validate the requested change.').trim(), 1200), assignments };
+    return { masterFocus: truncate(String(value.masterFocus || 'Implement, integrate, and validate the requested change.').trim(), 1200), assignments, delegationReason: delegationReason || 'Independent expert research is useful for this task.' };
   } catch { return undefined; }
 }
 async function dispatchWorkerPlan(task, health, plan, lastAssistant) {
@@ -254,7 +256,8 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant) {
     if (!ready.length) throw new Error('Worker dependency plan contains an unresolved cycle.');
     const assignments = ready.map(item => {
       const dependencies = (item.dependsOn || []).map(id => results.find(result => result.worker.id === id)).filter(Boolean);
-      const context = dependencies.length ? '\n\nCompleted dependency reports are available for this subtask. Reuse only relevant findings and validate them:\n' + dependencies.map(result => '[' + result.worker.name + ' — ' + result.role + ']\n' + truncate(result.text, 8000)).join('\n\n') : '';
+      let remaining = 12000;
+      const context = dependencies.length ? '\n\nCompleted dependency reports are available for this subtask. Reuse only relevant findings and validate them:\n' + dependencies.map(result => { const excerpt = truncate(result.text, Math.min(8000, remaining)); remaining -= excerpt.length; return '[' + result.worker.name + ' — ' + result.role + ']\n' + excerpt; }).join('\n\n') : '';
       return { ...item, task: item.task + context };
     });
     const dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
@@ -263,11 +266,11 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant) {
   }
   return { health, results };
 }
-async function planWorkerAssignments(task, workers, lastAssistant) {
-  const fallback = fallbackWorkerPlan(workers);
+async function planWorkerAssignments(task, workers, lastAssistant, maxTasks) {
+  const fallback = fallbackWorkerPlan(workers, maxTasks);
   const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}`).join('\n');
   const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Do not assign generic duplication, implementation, commands, writes, or Git mutations. Write masterFocus, role, and task in English so every worker receives an English assignment while preserving all user constraints. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"..."}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
-  const plannerGraph = ' Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
+  const plannerGraph = ' First decide whether delegation is worthwhile. For a direct, narrow, or low-risk task return delegate:false, a short delegationReason, and no assignments. Otherwise return delegate:true, a short delegationReason, and no more than ' + maxTasks + ' assignments. Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
   const controller = new AbortController(); activeAbortController = controller;
   try {
     const response = await ollama.chat({ model: await configuredModel(), messages: [{ role: 'system', content: plannerSystem + plannerGraph }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], tools: [], temperature: 0.1, contextWindow: Number(config().get('contextWindow', 0)), signal: controller.signal, onThinkingUnsupported: model => log(`Planner model ${model} does not support thinking; continuing without it.`) });
@@ -537,12 +540,14 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
     if (available.length) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
-      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant);
+      const maxWorkerTasks = Math.max(1, Math.min(8, Number(config().get('workerMaxTasks', 3)) || 3));
+      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks);
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
+      if (!plan.assignments.length) log('Worker delegation skipped: ' + plan.delegationReason);
       const dispatch = await dispatchWorkerPlan(taskWithResources, health, plan, lastAssistant);
       for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
       rememberWorkerReports(dispatch.results);
-      workerContext = `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
+      if (dispatch.results.length) workerContext = `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
     }
     postUi('workerHealth', { workers: health });
   }
