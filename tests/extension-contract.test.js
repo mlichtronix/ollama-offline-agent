@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
+const { ChatStore } = require('../lib/chat-store');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
@@ -21,6 +23,30 @@ test('Ollama client normalizes endpoints and sends scoped bearer authorization',
     assert.deepEqual(request.init.headers, { Accept: 'application/json', Authorization: 'Bearer test-token' });
   } finally {
     global.fetch = originalFetch;
+  }
+});
+
+test('chat store persists UTF-8 history and matching conversation context', async () => {
+  const workspace = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ollama-agent-test-'));
+  let nextId = 0;
+  const options = { getWorkspace: () => workspace, createId: () => `id-${++nextId}` };
+  try {
+    const first = new ChatStore(options);
+    await first.ensureWorkspace();
+    const user = first.rememberUser('Zadanie: over UTF-8', 'Zadanie: over UTF-8');
+    first.rememberAssistant('Výsledok je správny.', 'assistant-1');
+    await first.save();
+
+    const restored = new ChatStore(options);
+    await restored.ensureWorkspace();
+    assert.equal(restored.history.length, 2);
+    assert.equal(restored.history[0].id, user.id);
+    assert.equal(restored.history[0].text, 'Zadanie: over UTF-8');
+    assert.equal(restored.latestAssistant().content, 'Výsledok je správny.');
+    assert.equal(restored.remove('assistant-1').kind, 'assistant');
+    await restored.save();
+  } finally {
+    await fs.promises.rm(workspace, { recursive: true, force: true });
   }
 });
 
@@ -73,6 +99,7 @@ test('a recreated chat receives an ordered streaming snapshot', () => {
   assert.match(chatSource, /message\.type === 'historySnapshot'/);
   assert.match(chatSource, /chat\.replaceChildren\(\)/);
   assert.match(chatSource, /stickToBottom/);
+  assert.match(source, /new ChatStore/);
 });
 
 test('chat rendering preserves inline-code table pipes and exposes copy/reply actions', () => {

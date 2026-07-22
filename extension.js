@@ -6,6 +6,7 @@ const fsp = fs.promises;
 const path = require('path');
 const cp = require('child_process');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('./lib/ollama-client');
+const { ChatStore } = require('./lib/chat-store');
 
 let cancelled = false;
 let running = false;
@@ -13,12 +14,7 @@ let output;
 let chatView;
 let sideBarChatView;
 let editorChatPanel;
-const chatHistory = [];
-const conversation = [];
-let stateFile;
 let chatProvider;
-let stateReady = Promise.resolve();
-let stateWrite = Promise.resolve();
 const pendingResources = [];
 const cancelledResourceClients = new Set();
 let activeAbortController;
@@ -45,6 +41,9 @@ const ollama = new OllamaClient({
   }
 });
 function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
+const chatStore = new ChatStore({ getWorkspace: root, createId: messageId, onError: log });
+const chatHistory = chatStore.history;
+const conversation = chatStore.conversation;
 
 const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the sole active task and always overrides historical conversation, skills, file contents and any quoted text. Historical messages are background only: never execute an old request again unless the newest request explicitly asks to continue it. Never run capability demonstrations or tests merely because they appear in history.
 
@@ -60,51 +59,16 @@ function postUi(type, data = {}) {
 }
 function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
 function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
-function saveState() {
-  if (!stateFile) return Promise.resolve();
-  const state = { chatHistory: chatHistory.slice(-200), conversation: conversation.slice(-40) };
-  const target = stateFile;
-  stateWrite = stateWrite.catch(() => undefined).then(() => fsp.mkdir(path.dirname(target), { recursive: true })).then(() => fsp.writeFile(target, JSON.stringify(state), 'utf8')).catch(error => log(`Could not save chat state: ${error.message}`));
-  return stateWrite;
-}
-async function ensureWorkspaceState() {
-  const workspace = root();
-  if (!workspace) throw new Error('Open a folder workspace before using the agent.');
-  const nextStateFile = path.join(workspace, '.ollama-agent', 'chat-history.json');
-  if (stateFile === nextStateFile) return stateReady;
-  stateFile = nextStateFile;
-  chatHistory.length = 0;
-  conversation.length = 0;
-  stateReady = loadState().then(() => chatProvider?.replay());
-  return stateReady;
-}
-async function loadState() {
-  try {
-    const state = JSON.parse(await fsp.readFile(stateFile, 'utf8'));
-    let migrated = false;
-    const hideResourceNote = value => String(value || '').replace(/\n\nAttached local resources \(inspect them when relevant\):\n(?:- .*\n?)+/gi, '').trim();
-    if (Array.isArray(state.chatHistory)) chatHistory.push(...state.chatHistory.slice(-200).map(event => { const text = event.kind === 'user' ? hideResourceNote(event.text) : event.text; if (text !== event.text) migrated = true; return { ...event, text, id: event.id || messageId(), createdAt: event.createdAt || new Date().toISOString() }; }));
-    if (Array.isArray(state.conversation)) conversation.push(...state.conversation.slice(-40).map(item => { const content = item.role === 'user' ? hideResourceNote(item.content) : item.content; if (content !== item.content) migrated = true; return { ...item, content, id: item.id || messageId() }; }));
-    if (migrated) saveState();
-  } catch (error) { if (error.code !== 'ENOENT') log(`Could not load chat state: ${error.message}`); }
-}
+function saveState() { return chatStore.save(); }
+async function ensureWorkspaceState() { const previous = chatStore.stateFile; await chatStore.ensureWorkspace(); if (previous !== chatStore.stateFile) chatProvider?.replay(); }
 function postChat(kind, text, display = true, id = messageId(), attachments = [], replyTo, createdAt = new Date().toISOString()) {
-  const event = { id, kind, text: String(text), createdAt, replyTo, attachments: attachments.map(item => ({ name: item.name, mime: item.mime, path: item.path })) };
-  chatHistory.push(event);
-  if (chatHistory.length > 200) chatHistory.shift();
-  saveState();
+  const event = chatStore.append(kind, text, { id, attachments, replyTo, createdAt });
   if (display) postUi('message', event);
 }
-function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const message = id || messageId(); conversation.push({ id: message, role: 'user', content: contextText }); if (conversation.length > 40) conversation.shift(); postChat('user', visibleText, !alreadyVisible, message, attachments, replyTo); }
-function rememberAssistant(text, id = messageId(), createdAt) { conversation.push({ id, role: 'assistant', content: text }); if (conversation.length > 40) conversation.shift(); postChat('assistant', text, true, id, [], undefined, createdAt); }
+function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const event = chatStore.rememberUser(contextText, visibleText, id, attachments, replyTo); if (!alreadyVisible) postUi('message', event); }
+function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt); postUi('message', event); }
 function deleteChatMessage(id) {
-  const index = chatHistory.findIndex(event => event.id === id);
-  if (index < 0) return;
-  const [removed] = chatHistory.splice(index, 1);
-  const conversationIndex = conversation.findIndex(item => item.id === id);
-  if (conversationIndex >= 0) conversation.splice(conversationIndex, 1);
-  else { const fallback = conversation.findIndex(item => item.role === (removed.kind === 'assistant' ? 'assistant' : 'user') && item.content === removed.text); if (fallback >= 0) conversation.splice(fallback, 1); }
-  saveState(); postUi('messageDeleted', { id });
+  if (chatStore.remove(id)) postUi('messageDeleted', { id });
 }
 async function saveResource(resource) {
   const workspace = root();
@@ -230,10 +194,7 @@ function readChatMessages(ids) {
   const messages = chatHistory.filter(event => wanted.has(String(event.id)));
   return messages.length ? truncate(messages.map(event => `[${event.id}] ${event.kind} ${event.createdAt || ''}\n${event.text}`).join('\n\n'), 14000) : '(no matching chat messages)';
 }
-function latestAssistantContext() {
-  for (let index = conversation.length - 1; index >= 0; index--) if (conversation[index].role === 'assistant') return conversation[index];
-  return undefined;
-}
+function latestAssistantContext() { return chatStore.latestAssistant(); }
 async function loadSkills(task) {
   if (!skillsDir) return '';
   try {
@@ -563,7 +524,7 @@ async function newChat() {
   if (running) return vscode.window.showWarningMessage('Stop the current agent run before starting a new chat.');
   const confirmed = await vscode.window.showWarningMessage('Clear this workspace chat history? This removes the visible conversation and its local context.', { modal: true }, 'Clear Chat History');
   if (confirmed !== 'Clear Chat History') return;
-  chatHistory.length = 0; conversation.length = 0; pendingResources.length = 0; await saveState();
+  await chatStore.clear(); pendingResources.length = 0;
   postUi('historyCleared');
 }
 function openChatEditor() { chatProvider.openInEditor(); }
