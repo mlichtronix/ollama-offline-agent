@@ -28,8 +28,8 @@
       { "command": "ollamaOffline.openSkills", "title": "Ollama Offline Agent: Open Local Skills Folder" },
       { "command": "ollamaOffline.newChat", "title": "Ollama Offline Agent: Clear Chat History", "icon": { "light": "media/icons/trash-light.svg", "dark": "media/icons/trash-dark.svg" } },
       { "command": "ollamaOffline.about", "title": "Ollama Offline Agent: About", "icon": { "light": "media/icons/info-light.svg", "dark": "media/icons/info-dark.svg" } },
-      { "command": "ollamaOffline.openChatEditor", "title": "Ollama Offline Agent: Open Chat in Editor" }
-      ,{ "command": "ollamaOffline.moveChatToSecondarySidebar", "title": "Ollama Offline Agent: Open in Secondary Side Bar…" }
+      { "command": "ollamaOffline.openChatEditor", "title": "Ollama Offline Agent: Open Chat in Editor" },
+      { "command": "ollamaOffline.moveChatToSecondarySidebar", "title": "Ollama Offline Agent: Open in Secondary Side Bar…" }
     ],
     "viewsContainers": {
       "activitybar": [

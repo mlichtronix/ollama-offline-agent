@@ -97,6 +97,13 @@ test('webview controls do not reference removed header actions', () => {
   assert.match(chatSource, /imageViewer/);
 });
 
+test('the chat view has one current HTML renderer', () => {
+  assert.match(source, /renderHtml\(webview\)/);
+  assert.doesNotMatch(source, /renderHtmlV2/);
+  assert.doesNotMatch(source, /renderHtmlV3/);
+  assert.match(source, /html\(webview\)\s*\{\s*return this\.renderHtml\(webview\);\s*\}/s);
+});
+
 test('the package script derives a unique VSIX version from Git history', () => {
   const packageScript = fs.readFileSync(path.join(__dirname, '..', 'package-vsix.ps1'), 'utf8');
   assert.match(packageScript, /git -C \$root rev-list --count HEAD/);
