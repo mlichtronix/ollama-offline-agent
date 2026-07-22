@@ -19,6 +19,7 @@ let chatProvider;
 let stateReady = Promise.resolve();
 let stateWrite = Promise.resolve();
 const pendingResources = [];
+const cancelledResourceClients = new Set();
 let activeAbortController;
 let activeChild;
 let environmentDescription;
@@ -104,10 +105,19 @@ async function saveResource(resource) {
   const target = path.join(directory, `${Date.now()}-${name}`);
   await fsp.mkdir(directory, { recursive: true });
   await fsp.writeFile(target, data);
-  const item = { path: path.relative(workspace, target).replace(/\\/g, '/'), name, mime: String(resource.mime || 'application/octet-stream'), data: String(resource.data || '') };
+  if (cancelledResourceClients.delete(resource.clientId)) { await fsp.unlink(target).catch(() => undefined); return; }
+  const item = { clientId: resource.clientId, path: path.relative(workspace, target).replace(/\\/g, '/'), name, mime: String(resource.mime || 'application/octet-stream'), data: String(resource.data || '') };
   pendingResources.push(item);
   log(`Attached resource: ${item.path} (${data.length} bytes)`);
   postUi('resourceSaved', { clientId: resource.clientId, name: item.name, path: item.path, mime: item.mime });
+}
+async function cancelResource(clientId) {
+  const id = String(clientId || ''); if (!id) return;
+  cancelledResourceClients.add(id);
+  const index = pendingResources.findIndex(item => item.clientId === id);
+  if (index < 0) return;
+  const [item] = pendingResources.splice(index, 1); const workspace = root();
+  if (workspace && item.path) await fsp.unlink(path.join(workspace, item.path)).catch(() => undefined);
 }
 function config() { return vscode.workspace.getConfiguration('ollamaOffline'); }
 function endpointBase() { return String(config().get('endpoint') || '').trim().replace(/\/+$/, ''); }
@@ -607,6 +617,7 @@ class OfflineChatViewProvider {
       if (message.type === 'setEndpoint') setEndpoint(message.endpoint, message.token, Boolean(message.clearToken));
       if (message.type === 'pullModel') pullModel(message.model);
       if (message.type === 'resource') saveResource(message).catch(error => postUi('resourceError', { clientId: message.clientId, message: error.message }));
+      if (message.type === 'cancelResource') cancelResource(message.clientId);
       if (message.type === 'deleteMessage') deleteChatMessage(message.id);
       if (message.type === 'ready') { this.readyViews.add(view); this.replay(view); }
     });
