@@ -9,6 +9,7 @@ const { normalizeWorkers } = require('../lib/worker-pool');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
+const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
 
 test('Ollama client normalizes endpoints and sends scoped bearer authorization', async () => {
   assert.equal(normalizeEndpoint(' http://127.0.0.1:11434/// '), 'http://127.0.0.1:11434');
@@ -93,8 +94,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /rememberWorkerReports/);
   assert.match(source, /event\.internal/);
   assert.match(source, /Worker delegation is host-managed/);
-  assert.match(source, /authoritative source URL/);
+  assert.match(workerPoolSource, /source whose authority matches the claim/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
+  assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);
+  assert.match(source, /Present REST\/GraphQL-style tradeoffs as conditional analysis/i);
   assert.match(source, /workerTokenKey/);
   assert.match(source, /setWorkerToken/);
   assert.match(source, /loadWorkerModels/);
