@@ -179,6 +179,8 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /data-copy-table/);
   assert.match(chatSource, /copySvg/);
   assert.match(chatSource, /replySvg/);
+  assert.match(chatSource, /source-fallback-icon/);
+  assert.match(chatStyles, /\.source-fallback-icon/);
   assert.match(chatSource, /selectedExcerpt/);
   assert.match(chatSource, /getFullYear\(\).*getMonth\(\).*getSeconds\(\)/s);
   assert.match(chatSource, /renderAbout/);
