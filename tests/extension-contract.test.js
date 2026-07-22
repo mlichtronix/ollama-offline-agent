@@ -138,8 +138,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(workerPoolSource, /source whose authority matches the claim/);
   assert.match(workerPoolSource, /Use English for all reasoning, tool requests, source notes, and the final report/);
   assert.match(source, /Write masterFocus, role, task, and requires in English/);
-  assert.match(source, /availableWorkerCapabilities/);
-  assert.match(source, /item\.requires\.every\(capability => capabilities\.has\(capability\)\)/);
+  assert.match(source, /workerRuntimeCapabilities/);
+  assert.match(source, /workerSupportsRequirements/);
+  assert.match(source, /item\.requires\.every\(capability => workerRequirementNames\.has\(capability\)\)/);
+  assert.match(ollamaClientSource, /async modelProfile\(model\)/);
+  assert.match(ollamaClientSource, /async benchmark\(model\)/);
+  assert.match(workerPoolSource, /async health\(\{ benchmark = false \} = \{\}\)/);
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
