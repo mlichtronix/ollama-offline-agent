@@ -137,7 +137,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Worker delegation is host-managed/);
   assert.match(workerPoolSource, /source whose authority matches the claim/);
   assert.match(workerPoolSource, /Use English for all reasoning, tool requests, source notes, and the final report/);
-  assert.match(source, /Write masterFocus, role, and task in English/);
+  assert.match(source, /Write masterFocus, role, task, and requires in English/);
+  assert.match(source, /availableWorkerCapabilities/);
+  assert.match(source, /item\.requires\.every\(capability => capabilities\.has\(capability\)\)/);
+  assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
   assert.match(source, /cite a URL as a source only after web_fetch successfully returned that exact page/i);
@@ -151,7 +154,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /probeWorkerModels/);
   assert.match(chatSource, /serverPlusSvg/);
   assert.match(chatSource, /workersMenu/);
-  assert.match(chatSource, /role="dialog"/);
+  assert.match(chatSource, /composer\.before\(workersDialog\)/);
+  assert.match(chatSource, /<table class="worker-table">/);
   assert.match(chatSource, /closeWorkersDialog/);
   assert.match(chatSource, /openWorkersDialog/);
   assert.match(chatSource, /Optional Bearer token — stored securely/);
@@ -161,8 +165,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /workerTokenPopover/);
   assert.match(chatSource, /keyRoundSvg/);
   assert.match(chatSource, /data-load-worker-models/);
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-dialog-card[^}]*resize: both/);
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-table[^}]*overflow: auto/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /Worker manager is an in-flow panel above the composer/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-table-wrap[^}]*overflow-x: auto/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-token-popover/);
 });
 
