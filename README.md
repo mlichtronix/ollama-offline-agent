@@ -13,8 +13,11 @@ The extension is **offline-first**: it remains functional without a network conn
 - Local project file inspection, search, editing, shell commands, Git status/diff/log, and user-approved reusable playbooks.
 - Per-project conversation history stored in `.ollama-agent/chat-history.json`.
 - File and image attachments through drag and drop or the paperclip control.
+- Public-web search and page retrieval, explicitly enabled with the **Globe** control. Sources used for an answer are shown below it and retained in local history.
 - Local model selection, model download by name, response language selection, temperature, and context-window controls.
 - Workspace, guarded system, and full system access modes. Writes and commands require explicit user approval.
+- **Steer** and **Queue** modes for follow-up instructions while the agent is working.
+- Markdown tables and fenced code blocks, including lightweight Lua syntax highlighting for ` ```lua ` blocks.
 
 ## Requirements
 
@@ -51,6 +54,10 @@ The agent presents only user-facing messages in chat. Tool calls, command output
 
 Attachments are saved under `.ollama-agent/resources/` and are not intended for source control. Images are supplied to the model only when the selected model supports vision.
 
+Hover a user message to use the pencil action. It moves that prompt to the composer and removes that prompt and all later messages from visible history and model context. Edit it, then send it to create a clean replacement branch. Hover any user or assistant message to reveal its delete action.
+
+While a response is running, an empty composer shows **Stop**. With text in the composer, select either **Steer** to interrupt the current step and continue with the new instruction, or **Queue** to run the follow-up after the current work completes.
+
 ## Access Modes
 
 | Mode | Scope |
@@ -72,6 +79,14 @@ The model menu provides:
 - **Language**: response language, with `Auto` following the newest user message.
 
 The context setting is passed to the native Ollama API as `options.num_ctx`. Select a value appropriate for the model and available RAM/VRAM.
+
+## Web Access
+
+The extension is offline-first. Public web access is disabled by default and is never required for local coding work.
+
+Use the **Globe-off** icon in the composer to enable it. Its icon changes to **Globe** when enabled and the preference is stored in VS Code settings. The agent can then use `web_search` and `web_fetch` for public HTTP(S) pages. Localhost, private IP ranges, LAN addresses, `.local` hosts, embedded URL credentials, and non-HTTP(S) schemes are blocked.
+
+After a web-assisted answer, the extension shows the consulted sources beneath the message. Favicons are fetched by the extension host and stored as local `data:` images with the message, so they remain available after a reload. If the network, search provider, or target website fails, the agent should report that limitation rather than fabricate a result.
 
 ## Development
 
@@ -95,6 +110,6 @@ powershell -ExecutionPolicy Bypass -File .\package-vsix.ps1
 
 ## Privacy and Local Data
 
-The extension uses `http://127.0.0.1:11434` by default. You can configure an Ollama-compatible HTTP endpoint from the model menu for a server on your LAN or a cloud service. Remote endpoints receive the prompt plus only the project context, tool results, and attachments that the agent selects as relevant for inference. The extension asks for confirmation before using a non-local address.
+The extension uses `http://127.0.0.1:11434` by default. You can configure an Ollama-compatible HTTP endpoint from the model menu for a server on your LAN or a cloud service. Remote endpoints receive the prompt plus only the project context, tool results, and attachments that the agent selects as relevant for inference. The extension asks for confirmation before using a non-local address. Public web access is separate from the inference endpoint and remains off unless enabled with the Globe control.
 
 An optional Bearer token is stored in VS Code Secret Storage, never in the workspace, chat-history file, or `settings.json`. This feature is for Ollama-compatible `/api/*` services; it does not turn arbitrary OpenAI-compatible APIs into Ollama endpoints. Remove `.ollama-agent/` to delete the local conversation history and saved attachment copies for a workspace.
