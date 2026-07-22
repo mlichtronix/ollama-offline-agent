@@ -63,8 +63,9 @@ function attachmentMarkup(items, temporary = false) {
   const markup = items.map(item => {
     const name = escapeHtml(item.name || 'resource');
     const remove = temporary ? `<button class="attachment-remove" data-remove-attachment="${escapeHtml(item.clientId)}" title="Cancel attachment">${xSvg}</button>` : '';
-    const content = String(item.mime || '').startsWith('image/') && (item.data || item.preview) ? `<img class="attachment-image" src="${item.preview || `data:${escapeHtml(item.mime)};base64,${item.data}`}" alt="${name}" title="${name}">` : `<span class="attachment-file" title="${name}">${name}</span>`;
-    return temporary ? `<span class="queued-attachment">${content}${remove}</span>` : content;
+    const image = String(item.mime || '').startsWith('image/') && (item.data || item.preview);
+    const content = image ? `<img class="attachment-image" src="${item.preview || `data:${escapeHtml(item.mime)};base64,${item.data}`}" alt="${name}" title="${name}">` : `<span class="attachment-file" title="${name}">${name}</span>`;
+    return temporary ? `<span class="queued-attachment${image ? ' image-attachment' : ''}">${content}${remove}</span>` : content;
   }).join('');
   return `<div class="message-attachments${temporary ? ' pending-attachments' : ''}">${markup}</div>`;
 }
