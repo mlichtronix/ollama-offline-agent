@@ -79,9 +79,32 @@ function updateTaskUi(phase, status = 'active', detail = '') {
   if (!existing) activeTaskUi.timeline.push(item);
   postUi('taskUi', activeTaskUi);
 }
-function recordTaskFile(file, checkpoint) {
+function diffLineStats(before, after) {
+  const oldLines = String(before || '') ? String(before).split(/\r?\n/) : [];
+  const newLines = String(after || '') ? String(after).split(/\r?\n/) : [];
+  // The common-subsequence path gives familiar diff counts for normal source
+  // files. For very large files, keep this bounded and use the same prefix /
+  // suffix strategy used by the approval preview.
+  if (oldLines.length * newLines.length <= 360000) {
+    let previous = new Uint32Array(newLines.length + 1);
+    for (let oldIndex = 1; oldIndex <= oldLines.length; oldIndex++) {
+      const current = new Uint32Array(newLines.length + 1);
+      for (let newIndex = 1; newIndex <= newLines.length; newIndex++) current[newIndex] = oldLines[oldIndex - 1] === newLines[newIndex - 1] ? previous[newIndex - 1] + 1 : Math.max(previous[newIndex], current[newIndex - 1]);
+      previous = current;
+    }
+    const unchanged = previous[newLines.length];
+    return { added: newLines.length - unchanged, removed: oldLines.length - unchanged };
+  }
+  let start = 0; while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
+  let oldEnd = oldLines.length - 1; let newEnd = newLines.length - 1;
+  while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) { oldEnd--; newEnd--; }
+  return { added: Math.max(0, newEnd - start + 1), removed: Math.max(0, oldEnd - start + 1) };
+}
+function recordTaskFile(file, checkpoint, stats) {
   if (!activeTaskUi) return;
-  if (!activeTaskUi.files.some(item => item.path === file)) activeTaskUi.files.push({ path: file, checkpoint: Boolean(checkpoint) });
+  const existing = activeTaskUi.files.find(item => item.path === file);
+  if (existing) Object.assign(existing, { ...stats });
+  else activeTaskUi.files.push({ path: file, snapshot: checkpoint.snapshot, existed: checkpoint.existed, ...stats });
   activeTaskUi.canRestore ||= Boolean(checkpoint); postUi('taskUi', activeTaskUi);
 }
 function recordTaskCheck(command, result) {
@@ -353,6 +376,16 @@ async function rollbackLastChange() {
   if (record.existed) await fsp.copyFile(record.snapshot, record.target); else if (fs.existsSync(record.target)) await fsp.unlink(record.target);
   return `Restored ${record.target}.`;
 }
+async function openTaskFileDiff(relativePath) {
+  const item = activeTaskUi?.files.find(file => file.path === relativePath);
+  if (!item) return;
+  const target = resolveTarget(relativePath);
+  if (!fs.existsSync(target)) return vscode.window.showWarningMessage(`The changed file is no longer available: ${relativePath}`);
+  let left;
+  if (item.existed && item.snapshot && fs.existsSync(item.snapshot)) left = vscode.Uri.file(item.snapshot);
+  else left = (await vscode.workspace.openTextDocument({ content: '', language: path.extname(relativePath).slice(1) || 'plaintext' })).uri;
+  await vscode.commands.executeCommand('vscode.diff', left, vscode.Uri.file(target), `${relativePath} — Agent changes`);
+}
 function historySearchTerms(value) { return String(value || '').toLocaleLowerCase('sk').normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9_]{2,}/g) || []; }
 function searchChatHistory(query, limit) {
   const needle = String(query || '').trim().toLocaleLowerCase('sk'); const terms = [...new Set(historySearchTerms(needle))];
@@ -441,7 +474,10 @@ async function executeTool(call) {
       log(`Proposed diff for ${args.path}:\n${writePreview(before, args.content)}`);
       const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
       if (answer !== 'Allow') return 'User denied file write.';
-      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8'); recordTaskFile(args.path, checkpoint);
+      const priorTaskFile = activeTaskUi?.files.find(item => item.path === args.path);
+      let reviewBase = before;
+      if (priorTaskFile?.existed && priorTaskFile.snapshot) { try { reviewBase = await fsp.readFile(priorTaskFile.snapshot, 'utf8'); } catch {} }
+      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8'); recordTaskFile(args.path, checkpoint, diffLineStats(reviewBase, args.content));
       return `Wrote ${args.path} (${Buffer.byteLength(args.content, 'utf8')} bytes). Checkpoint: ${checkpoint.createdAt}.`;
     }
     if (call.function.name === 'rollback_last_change') return await rollbackLastChange();
@@ -783,6 +819,7 @@ class OfflineChatViewProvider {
         if (/^Restored /i.test(result) && activeTaskUi) { activeTaskUi.canRestore = false; postUi('taskUi', activeTaskUi); }
         postUi('taskRestoreResult', { result });
       });
+      if (message.type === 'openTaskDiff' && typeof message.path === 'string') void openTaskFileDiff(message.path);
       if (message.type === 'model') selectModel();
       if (message.type === 'newChat') newChat();
       if (message.type === 'about') showAbout();

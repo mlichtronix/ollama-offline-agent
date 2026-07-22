@@ -186,10 +186,15 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /function updateTaskUi/);
   assert.match(source, /recordTaskFile/);
   assert.match(source, /recordTaskCheck/);
+  assert.match(source, /function diffLineStats/);
+  assert.match(source, /function openTaskFileDiff/);
+  assert.match(source, /executeCommand\('vscode\.diff'/);
   assert.match(source, /type: 'taskUi'/);
   assert.match(chatSource, /data-task-mode/);
   assert.match(chatSource, /id = 'taskPanel'/);
   assert.match(chatSource, /Restore latest checkpoint/);
+  assert.match(chatSource, /data-task-diff/);
+  assert.match(chatSource, /review-summary/);
   assert.match(chatStyles, /\.task-panel/);
   assert.match(chatStyles, /\.task-review/);
 });
