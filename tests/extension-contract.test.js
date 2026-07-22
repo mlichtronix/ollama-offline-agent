@@ -87,8 +87,11 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /Queue follow-up/);
   assert.match(source, /workerToolNames/);
   assert.match(source, /executeWorkerTool/);
+  assert.match(source, /workerTokenKey/);
+  assert.match(source, /setWorkerToken/);
   assert.match(chatSource, /serverPlusSvg/);
   assert.match(chatSource, /workersMenu/);
+  assert.match(chatSource, /Optional Bearer token — stored securely/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {

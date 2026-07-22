@@ -42,7 +42,10 @@ const ollama = new OllamaClient({
     return endpointToken && endpointTokenFor === endpoint ? `Bearer ${endpointToken}` : '';
   }
 });
-const workerPool = new WorkerPool({ getWorkers: () => config().get('workers', []), log });
+function workerTokenKey(id) { return `ollamaWorkerToken:${id}`; }
+async function workerAuthorization(worker) { const token = String(await extensionSecrets?.get(workerTokenKey(worker.id)) || '').trim(); return token ? `Bearer ${token}` : ''; }
+async function hasWorkerToken(id) { return Boolean(await extensionSecrets?.get(workerTokenKey(id))); }
+const workerPool = new WorkerPool({ getWorkers: () => config().get('workers', []), getAuthorization: workerAuthorization, log });
 function messageId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`; }
 const chatStore = new ChatStore({ getWorkspace: root, createId: messageId, onError: log });
 const chatHistory = chatStore.history;
@@ -162,8 +165,18 @@ function isPrivateWebHost(host) { const value = String(host || '').toLowerCase()
 function safeWebUrl(value) { const url = new URL(String(value || '')); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || isPrivateWebHost(url.hostname)) throw new Error('Only public HTTP(S) web addresses are allowed.'); return url; }
 function webEnabled() { return config().get('webEnabled', false); }
 function configuredWorkers() { return normalizeWorkers(config().get('workers', [])); }
-async function setWorkers(value) {
-  await config().update('workers', normalizeWorkers(value), vscode.ConfigurationTarget.Global);
+async function setWorkers(value, tokens = {}) {
+  const previous = configuredWorkers(); const next = normalizeWorkers(value);
+  await config().update('workers', next, vscode.ConfigurationTarget.Global);
+  await Promise.all(previous.filter(worker => !next.some(item => item.id === worker.id)).map(worker => extensionSecrets.delete(workerTokenKey(worker.id))));
+  await Promise.all(next.map(worker => typeof tokens[worker.id] === 'string' && tokens[worker.id].trim() ? extensionSecrets.store(workerTokenKey(worker.id), tokens[worker.id].trim()) : undefined));
+  await publishSettings();
+}
+async function setWorkerToken(id, value, clearToken) {
+  if (!configuredWorkers().some(worker => worker.id === id)) return;
+  const token = String(value || '').trim();
+  if (token) await extensionSecrets.store(workerTokenKey(id), token);
+  else if (clearToken) await extensionSecrets.delete(workerTokenKey(id));
   await publishSettings();
 }
 async function checkWorkers() {
@@ -517,7 +530,8 @@ async function publishSettings(view = chatView) {
   catch (error) { endpointStatus = 'unavailable'; log(`Could not list models from ${endpointBase()}: ${error.message}`); }
   const selected = config().get('model') || models[0]?.name || '';
   if (!config().get('model') && selected) await config().update('model', selected, vscode.ConfigurationTarget.Global);
-  void view.webview.postMessage({ type: 'settings', mode: config().get('accessMode', 'workspace'), model: selected, language: configuredLanguage === 'auto' ? vscode.env.language : configuredLanguage, languageAuto: configuredLanguage === 'auto', webEnabled: webEnabled(), temperature: config().get('temperature', 0.2), contextWindow: config().get('contextWindow', 0), endpoint: endpointBase(), endpointStatus, hasEndpointToken: Boolean(endpointToken && endpointTokenFor === endpointBase()), models, workers: configuredWorkers() });
+  const workers = configuredWorkers(); const workerTokenIds = (await Promise.all(workers.map(async worker => (await hasWorkerToken(worker.id)) ? worker.id : undefined))).filter(Boolean);
+  void view.webview.postMessage({ type: 'settings', mode: config().get('accessMode', 'workspace'), model: selected, language: configuredLanguage === 'auto' ? vscode.env.language : configuredLanguage, languageAuto: configuredLanguage === 'auto', webEnabled: webEnabled(), temperature: config().get('temperature', 0.2), contextWindow: config().get('contextWindow', 0), endpoint: endpointBase(), endpointStatus, hasEndpointToken: Boolean(endpointToken && endpointTokenFor === endpointBase()), models, workers, workerTokenIds });
 }
 async function setModel(name) {
   try {
@@ -618,7 +632,8 @@ class OfflineChatViewProvider {
       if (message.type === 'setAccessMode') setAccessMode(String(message.mode || ''));
       if (message.type === 'setLanguage') setLanguage(String(message.language || 'auto'));
       if (message.type === 'setWebEnabled') setWebEnabled(Boolean(message.enabled));
-      if (message.type === 'setWorkers') setWorkers(message.workers);
+      if (message.type === 'setWorkers') setWorkers(message.workers, message.tokens || {});
+      if (message.type === 'setWorkerToken') setWorkerToken(String(message.id || ''), message.token, Boolean(message.clearToken));
       if (message.type === 'checkWorkers') checkWorkers();
       if (message.type === 'setGeneration') setGenerationSettings(message.temperature, message.contextWindow);
       if (message.type === 'setEndpoint') setEndpoint(message.endpoint, message.token, Boolean(message.clearToken));

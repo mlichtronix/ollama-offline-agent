@@ -61,7 +61,7 @@ While a response is running, an empty composer shows **Stop**. With text in the 
 
 ## Read-only Workers
 
-Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, and an enabled state. The **Check** action verifies availability without starting a task.
+Use the **Server-plus** control in the composer to add up to eight Ollama workers. Each worker has a name, an Ollama-compatible HTTP endpoint, a model name, an optional Bearer token, and an enabled state. Tokens are stored per worker in VS Code Secret Storage. The **Check** action verifies availability without starting a task.
 
 Before a new master task starts, enabled workers are checked in parallel. Each available worker receives the task and can independently use only these tools through the master host:
 
@@ -125,4 +125,4 @@ powershell -ExecutionPolicy Bypass -File .\package-vsix.ps1
 
 The extension uses `http://127.0.0.1:11434` by default. You can configure an Ollama-compatible HTTP endpoint from the model menu for a server on your LAN or a cloud service. Remote endpoints receive the prompt plus only the project context, tool results, and attachments that the agent selects as relevant for inference. The extension asks for confirmation before using a non-local address. Public web access is separate from the inference endpoint and remains off unless enabled with the Globe control.
 
-An optional master-endpoint Bearer token is stored in VS Code Secret Storage, never in the workspace, chat-history file, or `settings.json`. This feature is for Ollama-compatible `/api/*` services; it does not turn arbitrary OpenAI-compatible APIs into Ollama endpoints. Worker endpoint definitions do not currently support per-worker Bearer tokens. Remove `.ollama-agent/` to delete the local conversation history and saved attachment copies for a workspace.
+Master and worker Bearer tokens are stored separately in VS Code Secret Storage, never in the workspace, chat-history file, or `settings.json`. This feature is for Ollama-compatible `/api/*` services; it does not turn arbitrary OpenAI-compatible APIs into Ollama endpoints. Removing a worker also removes its saved token. Remove `.ollama-agent/` to delete the local conversation history and saved attachment copies for a workspace.
