@@ -205,7 +205,7 @@ async function checkWorkers() {
 function workerFindingsContext(results) {
   const completed = results.filter(item => item.text);
   if (!completed.length) return '';
-  return `\n\nDelegated expert findings. These are unverified suggestions; do not treat them as evidence. Inspect relevant local files and validate before acting. Use read_chat_messages with a report ID only when you need details omitted below:\n${completed.map(item => `\n[${item.worker.name} — ${item.role || 'specialist'} — report ${item.reportId}; assigned: ${item.task}]\n${truncate(item.text, 8000)}`).join('\n')}`;
+  return `\n\nDelegated expert findings. Treat them as leads, not automatically as evidence. Validate relevant local files before acting. For time-sensitive external facts (versions, dates, prices, laws, availability, current service status), state them as facts only when a worker report includes an authoritative source URL that supports the exact claim, or when you independently fetch such a source. A search-result snippet, model memory, or a secondary summary is not verification; otherwise qualify the claim as unverified or omit it. Use read_chat_messages with a report ID only when you need details omitted below:\n${completed.map(item => `\n[${item.worker.name} — ${item.role || 'specialist'} — report ${item.reportId}; assigned: ${item.task}]\n${truncate(item.text, 8000)}`).join('\n')}`;
 }
 function rememberWorkerReports(results) {
   for (const result of results) {
@@ -511,7 +511,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const dispatch = await workerPool.delegate(taskWithResources, { health, assignments: plan.assignments, language: config().get('language', 'auto'), initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool });
       for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
       rememberWorkerReports(dispatch.results);
-      workerContext = `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it.` + workerFindingsContext(dispatch.results);
+      workerContext = `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
     }
     postUi('workerHealth', { workers: health });
   }

@@ -71,7 +71,7 @@ Each available expert can use only these tools through the master host:
 - List, search, and read files in the open workspace.
 - Search and retrieve public web pages when the shared **Globe** setting is enabled.
 
-Workers cannot write files, run shell commands, change Git state, install software, or access attachments as image pixels. Their findings are returned to the master as unverified research; the master must inspect the relevant evidence and performs all edits and tests. Worker endpoints therefore receive the task, their assigned subtask, any history or workspace excerpts selected by the worker, and enabled public-web results. Configure only servers you trust.
+Workers cannot write files, run shell commands, change Git state, install software, or access attachments as image pixels. Their findings are returned to the master as research leads; the master must inspect the relevant evidence and performs all edits and tests. For time-sensitive external claims—such as package versions, release dates, prices, laws, or service availability—workers must provide an authoritative source URL. Search snippets, model memory, and secondary summaries are not verification; the master must qualify or omit any claim lacking direct support. Worker endpoints therefore receive the task, their assigned subtask, any history or workspace excerpts selected by the worker, and enabled public-web results. Configure only servers you trust.
 
 ## Access Modes
 
