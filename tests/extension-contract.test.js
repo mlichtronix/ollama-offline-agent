@@ -99,6 +99,8 @@ test('security controls remain present', () => {
 test('Ollama context and streaming remain configured', () => {
   assert.match(ollamaClientSource, /num_ctx/);
   assert.match(ollamaClientSource, /stream: true/);
+  assert.match(ollamaClientSource, /format/);
+  assert.match(workerPoolSource, /format: 'json'/);
   assert.match(ollamaClientSource, /api\/chat/);
   assert.match(source, /describeExecutionEnvironment/);
   assert.match(source, /configured VS Code integrated-terminal profile/);
