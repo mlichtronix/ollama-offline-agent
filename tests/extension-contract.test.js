@@ -96,7 +96,7 @@ test('webview controls do not reference removed header actions', () => {
   assert.match(source, /function cancelResource/);
   assert.match(chatSource, /function openImageViewer/);
   assert.match(chatSource, /imageViewer/);
-  assert.match(chatStyles, /\.steering-menu\s*\{\s*left:\s*50%;\s*width:\s*112px/);
+  assert.match(chatStyles, /\.steering-menu\s*\{\s*left:\s*50%;\s*width:\s*112px;\s*min-width:\s*0;\s*transform:\s*translateX\(-68%\)/);
 });
 
 test('the chat view has one current HTML renderer', () => {
