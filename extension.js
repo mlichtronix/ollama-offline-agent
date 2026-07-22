@@ -100,11 +100,11 @@ function diffLineStats(before, after) {
   while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) { oldEnd--; newEnd--; }
   return { added: Math.max(0, newEnd - start + 1), removed: Math.max(0, oldEnd - start + 1) };
 }
-function recordTaskFile(file, checkpoint, stats) {
+function recordTaskFile(file, checkpoint, stats, state = {}) {
   if (!activeTaskUi) return;
   const existing = activeTaskUi.files.find(item => item.path === file);
-  if (existing) Object.assign(existing, { ...stats });
-  else activeTaskUi.files.push({ path: file, snapshot: checkpoint.snapshot, existed: checkpoint.existed, ...stats });
+  if (existing) Object.assign(existing, { ...stats, ...state });
+  else activeTaskUi.files.push({ path: file, snapshot: checkpoint.snapshot, existed: checkpoint.existed, ...stats, ...state });
   activeTaskUi.canRestore ||= Boolean(checkpoint); postUi('taskUi', activeTaskUi);
 }
 function recordTaskCheck(command, result) {
@@ -380,7 +380,19 @@ async function openTaskFileDiff(relativePath) {
   const item = activeTaskUi?.files.find(file => file.path === relativePath);
   if (!item) return;
   const target = resolveTarget(relativePath);
+  if (item.deleted) {
+    if (!item.snapshot || !fs.existsSync(item.snapshot)) return vscode.window.showWarningMessage(`The deleted file snapshot is no longer available: ${relativePath}`);
+    if (!await isGitRepository()) { const document = await vscode.workspace.openTextDocument(vscode.Uri.file(item.snapshot)); await vscode.window.showTextDocument(document, { preview: true }); return; }
+    const empty = (await vscode.workspace.openTextDocument({ content: '', language: path.extname(relativePath).slice(1) || 'plaintext' })).uri;
+    await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(item.snapshot), empty, `${relativePath} — Deleted by agent`);
+    return;
+  }
   if (!fs.existsSync(target)) return vscode.window.showWarningMessage(`The changed file is no longer available: ${relativePath}`);
+  if (!await isGitRepository()) {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+    await vscode.window.showTextDocument(document, { preview: true });
+    return;
+  }
   let left;
   if (item.existed && item.snapshot && fs.existsSync(item.snapshot)) left = vscode.Uri.file(item.snapshot);
   else left = (await vscode.workspace.openTextDocument({ content: '', language: path.extname(relativePath).slice(1) || 'plaintext' })).uri;
@@ -425,6 +437,7 @@ const tools = [
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. Requires user approval; protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+  { type: 'function', function: { name: 'delete_file', description: 'Delete one file in the current workspace. Available only in Full system mode and always requires explicit approval. The agent creates a local checkpoint first.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'rollback_last_change', description: 'Restore the most recent file change made by the agent from a local checkpoint. Requires user approval.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_command', description: 'Run a command. Requires user approval; destructive system commands are blocked. In system access modes cwd can be an absolute path. Full system mode also permits user-accessible local application installers.', parameters: { type: 'object', properties: { command: { type: 'string' }, cwd: { type: 'string' } }, required: ['command'] } } },
   { type: 'function', function: { name: 'git_status', description: 'Read the current Git branch and working-tree status. No changes are made.', parameters: { type: 'object', properties: {} } } },
@@ -452,7 +465,7 @@ async function executeTool(call) {
   try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; }
   catch { return 'Invalid tool arguments JSON.'; }
   try {
-    if (activeTaskUi?.mode === 'plan' && new Set(['write_file', 'rollback_last_change', 'run_command', 'save_skill']).has(call.function.name)) return 'Plan mode is read-only. Describe this action in the plan instead of executing it.';
+    if (activeTaskUi?.mode === 'plan' && new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(call.function.name)) return 'Plan mode is read-only. Describe this action in the plan instead of executing it.';
     if (call.function.name === 'search_chat_history') return searchChatHistory(args.query, args.maxResults);
     if (call.function.name === 'read_chat_messages') return readChatMessages(args.ids);
     if (call.function.name === 'list_files') {
@@ -477,8 +490,23 @@ async function executeTool(call) {
       const priorTaskFile = activeTaskUi?.files.find(item => item.path === args.path);
       let reviewBase = before;
       if (priorTaskFile?.existed && priorTaskFile.snapshot) { try { reviewBase = await fsp.readFile(priorTaskFile.snapshot, 'utf8'); } catch {} }
-      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8'); recordTaskFile(args.path, checkpoint, diffLineStats(reviewBase, args.content));
+      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8'); recordTaskFile(args.path, checkpoint, diffLineStats(reviewBase, args.content), { deleted: false });
       return `Wrote ${args.path} (${Buffer.byteLength(args.content, 'utf8')} bytes). Checkpoint: ${checkpoint.createdAt}.`;
+    }
+    if (call.function.name === 'delete_file') {
+      if (!fullSystem()) return 'Deleting files requires Full system mode.';
+      if (path.isAbsolute(String(args.path || ''))) return 'Deletion is limited to a file inside the current workspace.';
+      const target = resolveTarget(args.path); const relative = path.relative(root(), target);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) return 'Deletion is limited to a file inside the current workspace.';
+      if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive files cannot be deleted.';
+      const info = await fsp.stat(target).catch(error => error.code === 'ENOENT' ? undefined : Promise.reject(error));
+      if (!info) return `File does not exist: ${args.path}`;
+      if (!info.isFile()) return 'Deletion is limited to individual files; directories are not supported.';
+      const answer = await vscode.window.showWarningMessage(`Agent wants to delete ${target}. A rollback checkpoint will be kept.`, { modal: true }, 'Delete file');
+      if (answer !== 'Delete file') return 'User denied file deletion.';
+      const before = await fsp.readFile(target, 'utf8'); const checkpoint = await createCheckpoint(target); await fsp.unlink(target);
+      recordTaskFile(args.path, checkpoint, diffLineStats(before, ''), { deleted: true });
+      return `Deleted ${args.path}. Checkpoint: ${checkpoint.createdAt}.`;
     }
     if (call.function.name === 'rollback_last_change') return await rollbackLastChange();
     if (call.function.name === 'run_command') {
@@ -486,7 +514,7 @@ async function executeTool(call) {
       const blocked = rejectDangerousCommand(args.command); if (blocked) return blocked;
       const commandCwd = args.cwd ? resolveTarget(args.cwd) : root();
       const approvalKey = `${commandCwd}\n${String(args.command)}`;
-      if (!approvedCommands.has(approvalKey)) {
+      if (!fullSystem() && !approvedCommands.has(approvalKey)) {
         const answer = await vscode.window.showWarningMessage(`Agent wants to run in ${commandCwd}:\n${args.command}`, { modal: true }, 'Allow once', 'Allow for this task');
         if (answer === 'Allow for this task') approvedCommands.add(approvalKey);
         else if (answer !== 'Allow once') return 'User denied command execution.';
@@ -598,7 +626,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   activeTaskUi = { mode: taskMode, state: 'running', timeline: [], files: [], checks: [], canRestore: false };
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
-  const access = mode === 'fullSystem' ? 'Full system mode is enabled: all paths accessible to the current user and local application installers are allowed after each explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
+  const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts; destructive system commands remain blocked, while file writes and restores still require explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
   const lastAssistant = latestAssistantContext();
   log(lastAssistant ? 'Context: the previous assistant answer was supplied as candidate context; older history is available on demand.' : 'Context: no previous assistant answer is available; complete local history is searchable on demand.');
   // Bind uploads to this exact prompt. A resource that is merely selected is
@@ -638,7 +666,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     postUi('workerHealth', { workers: health });
   }
   const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
-  const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
+  const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
   const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
@@ -733,7 +761,7 @@ function selectModel() { postUi('openSettings', { menu: 'model' }); }
 async function setAccessMode(value) {
   if (!['workspace', 'guardedSystem', 'fullSystem'].includes(value)) return;
   if (value === 'fullSystem') {
-    const confirmed = await vscode.window.showWarningMessage('Full system mode allows operations anywhere accessible to your Windows account, including installers. Every command still needs approval and destructive commands remain blocked.', { modal: true }, 'Enable Full System');
+    const confirmed = await vscode.window.showWarningMessage('Full system mode allows safe commands anywhere accessible to your Windows account, including installers, without repeated command prompts. Destructive system commands remain blocked; file writes and restores still require approval.', { modal: true }, 'Enable Full System');
     if (confirmed !== 'Enable Full System') return;
   }
   await config().update('accessMode', value, vscode.ConfigurationTarget.Global); await publishSettings();

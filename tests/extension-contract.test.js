@@ -189,12 +189,17 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /function diffLineStats/);
   assert.match(source, /function openTaskFileDiff/);
   assert.match(source, /executeCommand\('vscode\.diff'/);
+  assert.match(source, /showTextDocument\(document, \{ preview: true \}\)/);
+  assert.match(source, /if \(!fullSystem\(\) && !approvedCommands\.has\(approvalKey\)\)/);
+  assert.match(source, /name: 'delete_file'/);
+  assert.match(source, /Deletion is limited to a file inside the current workspace/);
   assert.match(source, /type: 'taskUi'/);
   assert.match(chatSource, /data-task-mode/);
   assert.match(chatSource, /id = 'taskPanel'/);
   assert.match(chatSource, /Restore latest checkpoint/);
   assert.match(chatSource, /data-task-diff/);
   assert.match(chatSource, /review-summary/);
+  assert.match(chatSource, /<details class="review-checks"/);
   assert.match(chatStyles, /\.task-panel/);
   assert.match(chatStyles, /\.task-review/);
 });
