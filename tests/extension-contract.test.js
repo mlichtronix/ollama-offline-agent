@@ -84,6 +84,7 @@ test('clearing chat history remains explicit and confirmed', () => {
 
 test('webview controls do not reference removed header actions', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  const chatStyles = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8');
   assert.doesNotMatch(chatSource, /getElementById\('new'\)/);
   assert.match(chatSource, /mode-\$\{value\}/);
   assert.match(chatSource, /document\.addEventListener\('drop'/);
@@ -95,6 +96,7 @@ test('webview controls do not reference removed header actions', () => {
   assert.match(source, /function cancelResource/);
   assert.match(chatSource, /function openImageViewer/);
   assert.match(chatSource, /imageViewer/);
+  assert.match(chatStyles, /\.steering-menu\s*\{\s*left:\s*50%;\s*width:\s*112px/);
 });
 
 test('the chat view has one current HTML renderer', () => {
