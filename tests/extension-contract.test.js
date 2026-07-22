@@ -151,9 +151,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /role="dialog"/);
   assert.match(chatSource, /closeWorkersDialog/);
   assert.match(chatSource, /openWorkersDialog/);
-  assert.match(chatSource, /Optional Bearer token — stored securely/);
-  assert.match(chatSource, /data-load-worker-models/);
+  assert.match(chatSource, /Bearer token saved securely/);
+  assert.match(chatSource, /Loading installed models/);
+  assert.match(chatSource, /scheduleWorkerSave/);
+  assert.match(chatSource, /scheduleNewWorkerProbe/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-dialog-card[^}]*resize: both/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-table[^}]*overflow: auto/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
@@ -187,6 +190,7 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   assert.match(chatSource, /function tableCells/);
   assert.match(chatSource, /data-copy-table/);
   assert.match(chatSource, /copySvg/);
+  assert.match(chatSource, /pencilSvg/);
   assert.match(chatSource, /replySvg/);
   assert.match(chatSource, /source-fallback-icon/);
   assert.match(chatStyles, /\.source-fallback-icon/);
