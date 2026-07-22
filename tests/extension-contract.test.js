@@ -177,6 +177,23 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8'), /\.worker-token-popover/);
 });
 
+test('task modes enforce read-only planning and expose timeline review state', () => {
+  const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  const chatStyles = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8');
+  assert.match(source, /requestedMode = 'execute'/);
+  assert.match(source, /Plan mode is read-only/);
+  assert.match(source, /const taskTools = taskMode === 'execute'/);
+  assert.match(source, /function updateTaskUi/);
+  assert.match(source, /recordTaskFile/);
+  assert.match(source, /recordTaskCheck/);
+  assert.match(source, /type: 'taskUi'/);
+  assert.match(chatSource, /data-task-mode/);
+  assert.match(chatSource, /id = 'taskPanel'/);
+  assert.match(chatSource, /Restore latest checkpoint/);
+  assert.match(chatStyles, /\.task-panel/);
+  assert.match(chatStyles, /\.task-review/);
+});
+
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.match(source, /new OllamaClient/);

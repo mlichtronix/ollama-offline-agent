@@ -31,6 +31,7 @@ let activeAgentMessages;
 const queuedAgentRequests = [];
 let activeWebSources = [];
 const workerBenchmarks = new Map();
+let activeTaskUi;
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
 // the exact in-progress reply after the persisted conversation.
@@ -64,6 +65,28 @@ function postUi(type, data = {}) {
   // Its snapshot will include all state accumulated while it was unavailable.
   const sources = type === 'message' ? (data.sources || []).map(item => ({ ...item, source: true })) : [];
   if (chatView) void chatProvider?.post(chatView, { type, ...data, ...(sources.length ? { attachments: [...(data.attachments || []), ...sources] } : {}) });
+}
+function updateTaskUi(phase, status = 'active', detail = '') {
+  if (!activeTaskUi) return;
+  if (status === 'active') {
+    for (const previous of activeTaskUi.timeline) {
+      if (previous.phase !== phase && previous.status === 'active') previous.status = 'complete';
+    }
+  }
+  const existing = activeTaskUi.timeline.find(item => item.phase === phase);
+  const item = existing || { phase, status, detail };
+  item.status = status; if (detail) item.detail = detail;
+  if (!existing) activeTaskUi.timeline.push(item);
+  postUi('taskUi', activeTaskUi);
+}
+function recordTaskFile(file, checkpoint) {
+  if (!activeTaskUi) return;
+  if (!activeTaskUi.files.some(item => item.path === file)) activeTaskUi.files.push({ path: file, checkpoint: Boolean(checkpoint) });
+  activeTaskUi.canRestore ||= Boolean(checkpoint); postUi('taskUi', activeTaskUi);
+}
+function recordTaskCheck(command, result) {
+  if (!activeTaskUi) return;
+  activeTaskUi.checks.push({ command: truncate(command, 180), passed: !testFailed(result), result: truncate(result, 600) }); postUi('taskUi', activeTaskUi);
 }
 function stopProcessTree(child = activeChild) { if (!child?.pid) return; if (process.platform === 'win32') cp.spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else child.kill('SIGTERM'); }
 function requestStop() { cancelled = true; activeAbortController?.abort(); stopProcessTree(); }
@@ -396,6 +419,7 @@ async function executeTool(call) {
   try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; }
   catch { return 'Invalid tool arguments JSON.'; }
   try {
+    if (activeTaskUi?.mode === 'plan' && new Set(['write_file', 'rollback_last_change', 'run_command', 'save_skill']).has(call.function.name)) return 'Plan mode is read-only. Describe this action in the plan instead of executing it.';
     if (call.function.name === 'search_chat_history') return searchChatHistory(args.query, args.maxResults);
     if (call.function.name === 'read_chat_messages') return readChatMessages(args.ids);
     if (call.function.name === 'list_files') {
@@ -411,16 +435,18 @@ async function executeTool(call) {
     if (call.function.name === 'web_search') return await webSearch(args.query, args.maxResults);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
     if (call.function.name === 'write_file') {
+      updateTaskUi('implement', 'active', 'Applying an approved workspace change.');
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
       let before = ''; try { before = await fsp.readFile(target, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       log(`Proposed diff for ${args.path}:\n${writePreview(before, args.content)}`);
       const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
       if (answer !== 'Allow') return 'User denied file write.';
-      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8');
+      const checkpoint = await createCheckpoint(target); await fsp.mkdir(path.dirname(target), { recursive: true }); await fsp.writeFile(target, args.content, 'utf8'); recordTaskFile(args.path, checkpoint);
       return `Wrote ${args.path} (${Buffer.byteLength(args.content, 'utf8')} bytes). Checkpoint: ${checkpoint.createdAt}.`;
     }
     if (call.function.name === 'rollback_last_change') return await rollbackLastChange();
     if (call.function.name === 'run_command') {
+      if (isTestCommand(call)) updateTaskUi('verify', 'active', 'Running the requested verification.');
       const blocked = rejectDangerousCommand(args.command); if (blocked) return blocked;
       const commandCwd = args.cwd ? resolveTarget(args.cwd) : root();
       const approvalKey = `${commandCwd}\n${String(args.command)}`;
@@ -429,7 +455,7 @@ async function executeTool(call) {
         if (answer === 'Allow for this task') approvedCommands.add(approvalKey);
         else if (answer !== 'Allow once') return 'User denied command execution.';
       }
-      return await runCommand(args.command, args.cwd);
+      const result = await runCommand(args.command, args.cwd); if (isTestCommand(call)) recordTaskCheck(args.command, result); return result;
     }
     if (call.function.name === 'git_status') { if (!await isGitRepository()) return 'This workspace is not a Git repository. Continue without Git.'; return await runCommand('git status --short --branch'); }
     if (call.function.name === 'git_diff') { if (!await isGitRepository()) return 'This workspace is not a Git repository. Continue without Git.'; return await runCommand(args.staged ? 'git diff --staged' : 'git diff'); }
@@ -465,11 +491,11 @@ function runCommand(command, requestedCwd) {
   });
 }
 function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
-async function chat(messages, onChunk) {
+async function chat(messages, onChunk, taskTools = tools) {
   const controller = new AbortController(); activeAbortController = controller;
   try {
     return await ollama.chat({
-      model: config().get('model'), messages, tools,
+      model: config().get('model'), messages, tools: taskTools,
       temperature: Number(config().get('temperature', 0.2)),
       contextWindow: Number(config().get('contextWindow', 0)),
       signal: controller.signal, onChunk,
@@ -525,14 +551,16 @@ function isTestCommand(call) {
   try { const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; return /\b(test|tests|pytest|jest|vitest|mocha|ctest|dotnet\s+test|cargo\s+test|go\s+test)\b/i.test(args.command || ''); } catch { return false; }
 }
 function testFailed(result) { return /^Exit\/error:/m.test(String(result)); }
-async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages) {
+async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute') {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
   if (!task) return;
   await ensureWorkspaceState();
-  running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : 'Task'}: ${task} ===`);
+  const taskMode = ['ask', 'plan', 'execute'].includes(requestedMode) ? requestedMode : 'execute';
+  activeTaskUi = { mode: taskMode, state: 'running', timeline: [], files: [], checks: [], canRestore: false };
+  running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: all paths accessible to the current user and local application installers are allowed after each explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
   const lastAssistant = latestAssistantContext();
@@ -554,6 +582,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   await configuredModel();
   let workerContext = '';
   if (!continuationMessages && configuredWorkers().some(worker => worker.enabled)) {
+    updateTaskUi('research', 'active', 'Checking available expert workers.');
     log('Checking configured read-only workers before starting the master task.');
     const health = await workerPool.health(); const available = health.filter(worker => worker.status === 'available');
     for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
@@ -569,9 +598,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const workerCapacity = '\n\nDelegation capacity: ' + plan.assignments.length + ' assignment(s) were selected from ' + available.length + ' available worker(s), with a configured maximum of ' + maxWorkerTasks + '. A requested maximum is an upper bound, not missing work. Do not claim that unassigned expert roles were required or missing.';
       if (dispatch.results.length) workerContext = workerCapacity + workerDispatchContext(dispatch.results) + `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
     }
+    updateTaskUi('research', 'complete', 'Expert-worker research phase completed.');
     postUi('workerHealth', { workers: health });
   }
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
+  const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
@@ -579,6 +611,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
       vscode.window.setStatusBarMessage(`Ollama agent: step ${step}`, 3000);
       const streamId = messageId(); let thinkingStarted = false;
+      updateTaskUi(step === 1 ? 'analyze' : 'continue', 'active', step === 1 ? 'Analyzing evidence and choosing the next action.' : `Continuing agent work (step ${step}).`);
       const data = await chat(messages, partial => {
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
         if (partial.content) {
@@ -586,7 +619,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           stream.text += partial.content; activeStreams.set(streamId, stream);
           postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
         }
-      });
+      }, taskTools);
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
       messages.push(message);
@@ -600,11 +633,11 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const response = message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
+        const response = message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });
-      log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
+      updateTaskUi('tools', 'active', calls.map(c => c.function.name).join(', ')); log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
       for (const call of calls) {
         if (cancelled) break;
         const result = await executeTool(call);
@@ -614,21 +647,21 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
-  } catch (error) { if (cancelled && error.name === 'AbortError') { log('Agent generation aborted by user.'); } else { log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } }
+  } catch (error) { if (cancelled && error.name === 'AbortError') { updateTaskUi('complete', 'stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { updateTaskUi('complete', 'failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) { activeTaskUi.state = cancelled ? 'stopped' : 'failed'; postUi('taskUi', activeTaskUi); } }
   finally {
     const steering = pendingSteering; pendingSteering = undefined;
     const continuation = activeAgentMessages ? [...activeAgentMessages] : undefined;
     for (const [id, stream] of activeStreams) { if (steering && stream.text) continuation?.push({ role: 'assistant', content: stream.text }); if (steering) postUi('assistantClear', { id }); }
-    activeStreams.clear(); activeAgentMessages = undefined; running = false; postUi('runState', { working: false });
-    if (steering) await ask(steering.text, steering.id, steering.attachments, steering.replyTo, continuation);
-    else if (queuedAgentRequests.length) { const next = queuedAgentRequests.shift(); await ask(next.text, next.id, next.attachments, next.replyTo); }
+    activeStreams.clear(); activeAgentMessages = undefined; if (activeTaskUi?.state === 'running') { activeTaskUi.state = cancelled ? 'stopped' : 'complete'; updateTaskUi('complete', cancelled ? 'stopped' : 'complete', cancelled ? 'Stopped by user.' : 'Finished.'); postUi('taskUi', activeTaskUi); } running = false; postUi('runState', { working: false });
+    if (steering) await ask(steering.text, steering.id, steering.attachments, steering.replyTo, continuation, steering.mode);
+    else if (queuedAgentRequests.length) { const next = queuedAgentRequests.shift(); await ask(next.text, next.id, next.attachments, next.replyTo, undefined, next.mode); }
   }
 }
-function steer(task, id, attachments = [], replyTo) {
-  if (!running) return ask(task, id, attachments, replyTo);
-  pendingSteering = { text: task, id, attachments, replyTo }; log(`Steering requested: ${task}`); requestStop();
+function steer(task, id, attachments = [], replyTo, mode = 'execute') {
+  if (!running) return ask(task, id, attachments, replyTo, undefined, mode);
+  pendingSteering = { text: task, id, attachments, replyTo, mode }; log(`Steering requested: ${task}`); requestStop();
 }
-function queueAgentRequest(task, id, attachments = [], replyTo) { if (!running) return ask(task, id, attachments, replyTo); queuedAgentRequests.push({ text: task, id, attachments, replyTo }); log(`Queued follow-up: ${task}`); }
+function queueAgentRequest(task, id, attachments = [], replyTo, mode = 'execute') { if (!running) return ask(task, id, attachments, replyTo, undefined, mode); queuedAgentRequests.push({ text: task, id, attachments, replyTo, mode }); log(`Queued follow-up: ${task}`); }
 async function health() {
   try { const info = await ollama.version(); vscode.window.showInformationMessage(`Ollama endpoint is ready (version ${info.version}).`); }
   catch (error) { vscode.window.showErrorMessage(`Ollama endpoint is unavailable: ${error.message}.`); }
@@ -741,10 +774,15 @@ class OfflineChatViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri, ...(root() ? [vscode.Uri.file(root())] : [])], retainContextWhenHidden: true };
     view._ollamaMessageDisposable?.dispose();
     view._ollamaMessageDisposable = view.webview.onDidReceiveMessage(message => {
-      if (message.type === 'prompt' && String(message.text || '').trim()) ask(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
-      if (message.type === 'steer' && String(message.text || '').trim()) steer(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
-      if (message.type === 'queue' && String(message.text || '').trim()) queueAgentRequest(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo);
+      if (message.type === 'prompt' && String(message.text || '').trim()) ask(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, undefined, message.mode);
+      if (message.type === 'steer' && String(message.text || '').trim()) steer(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, message.mode);
+      if (message.type === 'queue' && String(message.text || '').trim()) queueAgentRequest(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, message.mode);
       if (message.type === 'stop') requestStop();
+      if (message.type === 'restoreCheckpoint') rollbackLastChange().then(result => {
+        log(result);
+        if (/^Restored /i.test(result) && activeTaskUi) { activeTaskUi.canRestore = false; postUi('taskUi', activeTaskUi); }
+        postUi('taskRestoreResult', { result });
+      });
       if (message.type === 'model') selectModel();
       if (message.type === 'newChat') newChat();
       if (message.type === 'about') showAbout();
@@ -784,6 +822,7 @@ class OfflineChatViewProvider {
       streams: [...activeStreams.entries()].map(([id, stream]) => ({ id, ...stream })),
       working: running
     });
+    if (activeTaskUi) void this.post(view, { type: 'taskUi', ...activeTaskUi });
   }
   uiEvent(webview, event) {
     const workspace = root();
