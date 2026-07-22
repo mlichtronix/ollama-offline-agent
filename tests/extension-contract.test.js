@@ -80,8 +80,9 @@ test('webview controls do not reference removed header actions', () => {
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   assert.doesNotMatch(chatSource, /getElementById\('new'\)/);
   assert.match(chatSource, /mode-\$\{value\}/);
-  assert.match(chatSource, /window\.addEventListener\('drop'/);
+  assert.match(chatSource, /document\.addEventListener\('drop'/);
   assert.match(chatSource, /hasDroppedFiles/);
+  assert.match(chatSource, /No files were received from the drop operation/);
 });
 
 test('the package script derives a unique VSIX version from Git history', () => {
