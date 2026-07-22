@@ -540,7 +540,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
     if (available.length) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
-      const maxWorkerTasks = Math.max(1, Math.min(8, Number(config().get('workerMaxTasks', 3)) || 3));
+      const maxWorkerTasks = available.length;
       const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks);
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
       if (!plan.assignments.length) log('Worker delegation skipped: ' + plan.delegationReason);

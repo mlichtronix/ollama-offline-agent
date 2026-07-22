@@ -111,7 +111,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /dispatchWorkerPlan/);
   assert.match(source, /hasDependencyCycle/);
   assert.match(source, /dependsOn/);
-  assert.match(source, /workerMaxTasks/);
+  assert.match(source, /const maxWorkerTasks = available\.length/);
   assert.match(source, /delegationReason/);
   assert.match(source, /An explicit user maximum is an upper bound/);
   assert.match(source, /Do not substitute a generic workspace inventory/);
