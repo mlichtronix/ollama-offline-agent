@@ -63,31 +63,42 @@ The actual built-in capabilities are: listing, reading, searching, and writing f
 
 function log(text) { output.appendLine(text); }
 function escapeExportHtml(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
-function exportInlineMarkdown(value) { return escapeExportHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>'); }
+function exportInlineMarkdown(value) { let html = escapeExportHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/(\*\*\*|___)(.+?)\1/g, '<strong><em>$2</em></strong>').replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>').replace(/~~(.+?)~~/g, '<del>$1</del>'); html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/(^|[^\w])_([^_]+)_(?!\w)/g, '$1<em>$2</em>').replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>'); return html.replace(/&lt;(https?:\/\/[^\s&]+(?:&amp;[^\s&]+)*)&gt;/g, '<a href="$1">$1</a>'); }
 function exportTableCells(line) { return String(line).trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, '|')); }
+function exportMath(value) { return escapeExportHtml(value).replace(/\^\{([^}]+)\}|\^(\w)/g, (_, group, character) => `<sup>${group || character}</sup>`).replace(/_\{([^}]+)\}|_(\w)/g, (_, group, character) => `<sub>${group || character}</sub>`); }
+function exportCodeLanguage(value) { const aliases = { 'c#': 'csharp', cs: 'csharp', 'c++': 'cpp', cxx: 'cpp', hpp: 'cpp', py: 'python', js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', sh: 'bash', shell: 'bash', pwsh: 'powershell', ps1: 'powershell', yml: 'yaml', html: 'xml', svg: 'xml', md: 'markdown', text: 'plaintext', plain: 'plaintext' }; const requested = String(value || '').trim().toLowerCase(); return aliases[requested] || requested || 'plaintext'; }
 function exportMarkdown(value) {
-  const lines = String(value || '').replace(/\r/g, '').split('\n'); const out = []; let code = []; let inCode = false; let list;
-  const closeList = () => { if (list) { out.push(`</${list}>`); list = undefined; } };
+  const lines = String(value || '').replace(/\r/g, '').split('\n'); const out = []; let code = []; let codeLanguage = ''; let inCode = false; let listStack = []; let inQuote = false; let math = [];
+  const closeList = () => { while (listStack.length) out.push(`</${listStack.pop().type}>`); };
+  const closeQuote = () => { if (inQuote) { out.push('</blockquote>'); inQuote = false; } };
+  const openList = (type, level) => { while (listStack.length > level + 1) out.push(`</${listStack.pop().type}>`); if (listStack[level]?.type !== type) { while (listStack.length > level) out.push(`</${listStack.pop().type}>`); } while (listStack.length <= level) { listStack.push({ type }); out.push(`<${type}>`); } };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (line.startsWith('```')) { closeList(); if (inCode) { out.push(`<pre><code>${escapeExportHtml(code.join('\n'))}</code></pre>`); code = []; } inCode = !inCode; continue; }
+    if (line.trim() === '$$') { closeList(); closeQuote(); if (math.length) { out.push(`<div class="math-block">${exportMath(math.join('\n'))}</div>`); math = []; } else math = ['']; continue; }
+    if (math.length) { math.push(line); continue; }
+    if (/^\$\$.+\$\$$/.test(line.trim())) { closeList(); closeQuote(); out.push(`<div class="math-block">${exportMath(line.trim().slice(2, -2))}</div>`); continue; }
+    if (line.startsWith('```')) { closeList(); closeQuote(); if (inCode) { const language = exportCodeLanguage(codeLanguage); out.push(`<pre><code class="hljs language-${escapeExportHtml(language)}">${escapeExportHtml(code.join('\n'))}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) { closeList(); if (!inQuote) { out.push('<blockquote>'); inQuote = true; } out.push(quote[1] ? `<p>${exportInlineMarkdown(quote[1])}</p>` : '<div class="spacer"></div>'); continue; }
+    closeQuote();
     if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
       closeList(); const headers = exportTableCells(line); index += 2; const rows = [];
       while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(exportTableCells(lines[index])); index++; }
       index--; out.push(`<div class="table-wrap"><table><thead><tr>${headers.map(cell => `<th>${exportInlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cell) => `<td>${exportInlineMarkdown(row[cell] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
     }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/); const unordered = line.match(/^[-*+]\s+(.+)$/); const ordered = line.match(/^\d+\.\s+(.+)$/);
+    const heading = line.match(/^(#{1,3})\s+(.+)$/); const listItem = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
     if (heading) { closeList(); const level = heading[1].length; out.push(`<h${level}>${exportInlineMarkdown(heading[2])}</h${level}>`); continue; }
-    if (unordered || ordered) { const type = ordered ? 'ol' : 'ul'; if (list && list !== type) closeList(); if (!list) { list = type; out.push(`<${type}>`); } out.push(`<li>${exportInlineMarkdown((unordered || ordered)[1])}</li>`); continue; }
+    if (listItem) { const level = Math.floor(listItem[1].replace(/\t/g, '  ').length / 2); const type = /\d+\./.test(listItem[2]) ? 'ol' : 'ul'; const task = listItem[3].match(/^\[([ xX])\]\s+(.+)$/); openList(type, level); out.push(`<li${task ? ' class="task-item"' : ''}>${task ? `<input type="checkbox" disabled${/[xX]/.test(task[1]) ? ' checked' : ''}> ${exportInlineMarkdown(task[2])}` : exportInlineMarkdown(listItem[3])}</li>`); continue; }
     closeList(); out.push(line ? `<p>${exportInlineMarkdown(line)}</p>` : '<div class="spacer"></div>');
   }
-  closeList(); if (inCode) out.push(`<pre><code>${escapeExportHtml(code.join('\n'))}</code></pre>`); return out.join('');
+  closeList(); closeQuote(); if (math.length) out.push(`<div class="math-block">${exportMath(math.join('\n'))}</div>`); if (inCode) { const language = exportCodeLanguage(codeLanguage); out.push(`<pre><code class="hljs language-${escapeExportHtml(language)}">${escapeExportHtml(code.join('\n'))}</code></pre>`); } return out.join('');
 }
 function exportTimestamp(value) { try { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)); } catch { return String(value || ''); } }
 function conversationExportHtml(events) {
-  const messages = events.map(event => {
+  const highlighter = vscode.Uri.file(path.join(__dirname, 'media', 'highlight.min.js')).toString();
+  const messages = `<style>.markdown del{opacity:.8}.markdown blockquote{margin:8px 0;padding:2px 0 2px 11px;border-left:3px solid #d0d7de;color:#57606a}.markdown .task-item{list-style:none;margin-left:-16px}.markdown .task-item input{margin:0 5px 0 0;vertical-align:middle}.markdown .math-block{margin:9px 0;padding:8px 10px;overflow-x:auto;background:#f6f8fa;border:1px solid #d0d7de;border-radius:5px;font-family:'Cambria Math',Cambria,serif;font-size:11pt;text-align:center}</style><script src="${escapeExportHtml(highlighter)}" defer></script><script defer>addEventListener('DOMContentLoaded',()=>document.querySelectorAll('pre code').forEach(block=>{try{hljs.highlightElement(block)}catch{}}))</script>` + events.map(event => {
     const role = event.kind === 'assistant' ? 'Agent' : 'User';
     const attachments = (event.attachments || []).length ? `<p class="attachments">Attachments: ${(event.attachments || []).map(item => escapeExportHtml(item.name || item.path)).join(', ')}</p>` : '';
     const sources = (event.sources || []).length ? `<p class="sources">Sources: ${(event.sources || []).map(item => `<a href="${escapeExportHtml(item.url)}">${escapeExportHtml(item.title || item.url)}</a>`).join(' · ')}</p>` : '';
@@ -121,7 +132,7 @@ async function exportChatPdf() {
   const temporaryHtml = path.join(os.tmpdir(), `ollama-conversation-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
   try {
     await fsp.writeFile(temporaryHtml, conversationExportHtml(events), 'utf8');
-    await runFile(browser, ['--headless=new', '--disable-gpu', '--no-pdf-header-footer', `--print-to-pdf=${target.fsPath}`, vscode.Uri.file(temporaryHtml).toString()]);
+    await runFile(browser, ['--headless=new', '--disable-gpu', '--allow-file-access-from-files', '--no-pdf-header-footer', `--print-to-pdf=${target.fsPath}`, vscode.Uri.file(temporaryHtml).toString()]);
     await waitForPdfOutput(target.fsPath);
     const action = await vscode.window.showInformationMessage(`Conversation exported to ${path.basename(target.fsPath)}.`, 'Reveal File');
     if (action === 'Reveal File') await vscode.commands.executeCommand('revealFileInOS', target);

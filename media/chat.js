@@ -88,9 +88,12 @@ function escapeHtml(value) {
 function inlineMarkdown(value) {
   let html = escapeHtml(value);
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  return html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+  html = html.replace(/(\*\*\*|___)(.+?)\1/g, '<strong><em>$2</em></strong>');
+  html = html.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>');
+  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/(^|[^\w])_([^_]+)_(?!\w)/g, '$1<em>$2</em>');
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>');
+  return html.replace(/&lt;(https?:\/\/[^\s&]+(?:&amp;[^\s&]+)*)&gt;/g, '<a href="$1">$1</a>');
 }
 function tableCells(line) {
   const source = String(line).trim().replace(/^\|/, '').replace(/\|$/, ''); const cells = []; let cell = ''; let inCode = false;
@@ -106,26 +109,35 @@ function highlightCode(source, language) {
   }
   return escapeHtml(source);
 }
+function renderMath(value) { return escapeHtml(value).replace(/\^\{([^}]+)\}|\^(\w)/g, (_, group, character) => `<sup>${group || character}</sup>`).replace(/_\{([^}]+)\}|_(\w)/g, (_, group, character) => `<sub>${group || character}</sub>`); }
 function markdown(value) {
   const lines = String(value).replace(/\r/g, '').split('\n');
-  const out = []; let inCode = false; let code = []; let codeLanguage = ''; let list = null;
-  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const out = []; let inCode = false; let code = []; let codeLanguage = ''; let listStack = []; let inQuote = false; let math = [];
+  const closeList = () => { while (listStack.length) out.push(`</${listStack.pop().type}>`); };
+  const closeQuote = () => { if (inQuote) { out.push('</blockquote>'); inQuote = false; } };
+  const openList = (type, level) => { while (listStack.length > level + 1) out.push(`</${listStack.pop().type}>`); if (listStack[level]?.type !== type) { while (listStack.length > level) out.push(`</${listStack.pop().type}>`); } while (listStack.length <= level) { listStack.push({ type }); out.push(`<${type}>`); } };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (line.startsWith('```')) { closeList(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
+    if (line.trim() === '$$') { closeList(); closeQuote(); if (math.length) { out.push(`<div class="math-block">${renderMath(math.join('\n'))}</div>`); math = []; } else math = ['']; continue; }
+    if (math.length) { math.push(line); continue; }
+    if (/^\$\$.+\$\$$/.test(line.trim())) { closeList(); closeQuote(); out.push(`<div class="math-block">${renderMath(line.trim().slice(2, -2))}</div>`); continue; }
+    if (line.startsWith('```')) { closeList(); closeQuote(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); code = []; codeLanguage = ''; } else codeLanguage = line.slice(3).trim().split(/\s+/)[0]; inCode = !inCode; continue; }
     if (inCode) { code.push(line); continue; }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) { closeList(); if (!inQuote) { out.push('<blockquote>'); inQuote = true; } out.push(quote[1] ? `<div>${inlineMarkdown(quote[1])}</div>` : '<br>'); continue; }
+    closeQuote();
     if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
     if (/^\|?.+\|.+\|?$/.test(line) && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1] || '')) {
       closeList(); const headers = tableCells(line); const markdownRows = [line, lines[index + 1]]; index += 2; const rows = [];
       while (index < lines.length && /^\|?.+\|.+\|?$/.test(lines[index])) { rows.push(tableCells(lines[index])); markdownRows.push(lines[index]); index++; }
       index--; out.push(`<div class="table-wrap"><button class="copy-table" title="Copy table as Markdown" data-copy-table="${escapeHtml(markdownRows.join('\n'))}">${copySvg}</button><table><thead><tr>${headers.map(cell => `<th>${inlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cell) => `<td>${inlineMarkdown(row[cell] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
     }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/); const unordered = line.match(/^[-*+]\s+(.+)$/); const ordered = line.match(/^\d+\.\s+(.+)$/);
+    const heading = line.match(/^(#{1,3})\s+(.+)$/); const listItem = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
     if (heading) { closeList(); const level = heading[1].length; out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue; }
-    if (unordered || ordered) { const type = ordered ? 'ol' : 'ul'; if (list && list !== type) closeList(); if (!list) { list = type; out.push(`<${type}>`); } out.push(`<li>${inlineMarkdown((unordered || ordered)[1])}</li>`); continue; }
+    if (listItem) { const level = Math.floor(listItem[1].replace(/\t/g, '  ').length / 2); const type = /\d+\./.test(listItem[2]) ? 'ol' : 'ul'; const task = listItem[3].match(/^\[([ xX])\]\s+(.+)$/); openList(type, level); out.push(`<li${task ? ' class="task-item"' : ''}>${task ? `<input type="checkbox" disabled${/[xX]/.test(task[1]) ? ' checked' : ''}> ${inlineMarkdown(task[2])}` : inlineMarkdown(listItem[3])}</li>`); continue; }
     closeList(); out.push(line ? `<div>${inlineMarkdown(line)}</div>` : '<br>');
   }
-  closeList(); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); } return out.join('');
+  closeList(); closeQuote(); if (math.length) out.push(`<div class="math-block">${renderMath(math.join('\n'))}</div>`); if (inCode) { const language = normalizeCodeLanguage(codeLanguage); out.push(`<pre class="language-${escapeHtml(language || 'plain')}"><code class="hljs${language ? ` language-${escapeHtml(language)}` : ''}">${highlightCode(code.join('\n'), language)}</code></pre>`); } return out.join('');
 }
 function attachmentMarkup(items, temporary = false) {
   if (!items?.length) return '';

@@ -163,7 +163,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /checkCheckSvg/);
   assert.match(chatSource, /taskUi = undefined; renderTaskUi\(\)/);
   assert.match(chatSource, /out\.push\('<hr>'\)/);
+  assert.match(chatSource, /task-item/);
+  assert.match(chatSource, /math-block/);
+  assert.match(chatSource, /~~\(\.\+\?\)~~/);
   assert.match(source, /function exportMarkdown\(/);
+  assert.match(source, /function exportCodeLanguage\(/);
+  assert.match(source, /highlightElement\(block\)/);
   assert.match(source, /exportMarkdown\(event\.text\)/);
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
