@@ -441,10 +441,19 @@ function workerFindingsContext(results) {
   if (!completed.length) return '';
   return `\n\nDelegated expert findings. Treat them as leads, not automatically as evidence. Validate relevant local files before acting. For every external factual claim, check that the cited source is authoritative for that exact subject: specifications/standards bodies for protocol behavior, official project docs or registry metadata for package facts, and official publishers/registers for legal or service facts. A vendor blog supports its own claims but not universal protocol semantics. For time-sensitive facts (versions, dates, prices, laws, availability, current service status), state them as facts only when a worker report includes an exact, authoritative URL that supports the exact claim, or when you independently fetch such a source. A search-result snippet, model memory, or a secondary summary is not verification; otherwise qualify the claim as unverified or omit it. Present REST/GraphQL-style tradeoffs as conditional analysis with assumptions, never as absolute rules. Use read_chat_messages with a report ID only when you need details omitted below:\n${completed.map(item => `\n[${item.worker.name} — ${item.role || 'specialist'} — report ${item.reportId}; assigned: ${item.task}]\n${truncate(item.text, 8000)}`).join('\n')}`;
 }
+function workerFailureReason(result) {
+  if (result?.error) return String(result.error);
+  if (result?.quality?.accepted === false) {
+    const reasons = Array.isArray(result.quality.repairReasons) ? result.quality.repairReasons.filter(Boolean) : [];
+    return reasons.length ? `the host rejected the report after correction: ${reasons.join('; ')}` : 'the host rejected the report after validation';
+  }
+  if ((result?.requires || []).includes('public_web') && !result?.report?.fetchedUrls?.length) return 'the report required public-web evidence but did not fetch any URL through the host';
+  return 'the worker returned no usable findings';
+}
 function workerDispatchContext(results) {
   const failed = results.filter(item => !workerResultUsable(item));
   if (!failed.length) return '';
-  return '\n\nWorker dispatch failures: ' + failed.map(item => item.worker.name + ' (' + (item.role || 'specialist') + '): ' + item.error).join('; ') + '. These assignments did not produce reports; do not describe them as missing, completed, or evidence.';
+  return '\n\nWorker dispatch failures: ' + failed.map(item => item.worker.name + ' (' + (item.role || 'specialist') + '): ' + workerFailureReason(item)).join('; ') + '. These assignments did not produce reports; do not describe them as missing, completed, or evidence.';
 }
 function rememberWorkerReports(results) {
   for (const result of results) {
@@ -1067,7 +1076,10 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       try { dispatch = await dispatchWorkerPlan(taskWithResources, health, plan, lastAssistant, workerController.signal); }
       finally { releaseActiveAbortController(workerController); }
       throwIfCancelled();
-      for (const result of dispatch.results) log(result.text ? `Worker ${result.worker.name} completed ${result.task}${result.quality?.repairAttempted ? result.quality.accepted ? ' after one host-requested report correction' : ' after one unsuccessful host-requested report correction' : ''}` : `Worker ${result.worker.name} did not return findings: ${result.error || 'empty response'}`);
+      for (const result of dispatch.results) {
+        if (workerResultUsable(result)) log(`Worker ${result.worker.name} completed ${result.task}${result.quality?.repairAttempted ? ' after one host-requested report correction' : ''}`);
+        else log(`Worker ${result.worker.name} did not return usable findings: ${workerFailureReason(result)}`);
+      }
       rememberWorkerReports(dispatch.results);
       const workerCapacity = '\n\nDelegation capacity: ' + plan.assignments.length + ' assignment(s) were selected from ' + available.length + ' available worker(s), with a configured maximum of ' + maxWorkerTasks + '. A requested maximum is an upper bound, not missing work. Do not claim that unassigned expert roles were required or missing.';
       if (dispatch.results.length) workerContext = workerCapacity + workerDispatchContext(dispatch.results) + `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
@@ -1078,7 +1090,10 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
   const priorRequestContext = lastUser ? `\n\nCandidate previous user request (use it only when it clarifies the newest task; otherwise ignore it):\n${truncate(lastUser.content, 4000)}` : '';
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  const webAuthorization = webEnabled()
+    ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search and web_fetch for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If a fetch or search fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
+    : '\n\nPublic web access is OFF. Do not claim to have fetched public sources. If the task requires an external source, report that the Globe setting must be enabled or use supplied local material.';
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
