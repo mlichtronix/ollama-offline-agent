@@ -671,7 +671,24 @@ async function webFetch(url) {
   // merely because the initial lightweight fetch returned an SPA shell.
   const rendered = await browserOpen(target.toString(), 'chrome', 8000);
   if (/^Tool error:/i.test(rendered)) return `The initial fetch returned a JavaScript-required shell. Automatic browser rendering also failed:\n${rendered}`;
-  return `The initial fetch returned a JavaScript-required shell. The extension automatically rendered it with the controlled browser; use the rendered DOM and discovered resources below, then inspect relevant source bundles with web_download and search_downloaded_web_file.\n\n${rendered}`;
+  const bundle = rendered.match(/^\s*-\s+(https?:\/\/[^\s]+\.(?:[cm]?js)(?:\?[^\s]*)?)\s*$/im)?.[1]; let download = '';
+  if (bundle) { try { download = '\n\nThe extension also downloaded the primary JavaScript bundle for source inspection:\n' + await webDownload(bundle, 4 * 1024 * 1024); } catch (error) { download = `\n\nAutomatic primary-bundle download failed: ${error.message}`; } }
+  return `The initial fetch returned a JavaScript-required shell. The extension automatically rendered it with the controlled browser; use the rendered DOM and discovered resources below, then inspect relevant source bundles with web_download and search_downloaded_web_file.${download}\n\n${rendered}`;
+}
+function explicitPublicUrls(text) {
+  const found = []; const pattern = /https?:\/\/[^\s"'<>`\])}]+/gi; let match;
+  while ((match = pattern.exec(String(text || ''))) && found.length < 3) { try { const target = safeWebUrl(match[0]); if (!found.includes(target.toString())) found.push(target.toString()); } catch {} }
+  return found;
+}
+async function prefetchExplicitWebSources(task) {
+  if (!webEnabled()) return '';
+  const urls = explicitPublicUrls(task); if (!urls.length) return '';
+  const reports = [];
+  for (const url of urls) {
+    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 60000)}`); }
+    catch (error) { reports.push(`[Host fetch failed: ${url}]\n${error.message}`); }
+  }
+  return reports.length ? `\n\nThe extension host fetched these public URLs explicitly named by the user before this turn. They are primary task evidence; use them instead of treating search snippets as evidence. Do not claim they were unavailable unless the included host result says so.\n\n${reports.join('\n\n')}` : '';
 }
 function downloadedWebFileName(target, response) {
   const disposition = String(response.headers.get('content-disposition') || '');
@@ -1149,6 +1166,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
+  const explicitWebContext = !continuationMessages ? await prefetchExplicitWebSources(task) : '';
   let workerContext = ''; const masterSession = { current: {}, fallbacks: [], limitedKeys: new Set() };
   const directAgentQuestion = isDirectAgentQuestion(taskWithResources);
   if (configuredWorkers().some(worker => worker.enabled)) {
@@ -1195,7 +1213,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const webAuthorization = webEnabled()
     ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search, web_fetch, web_download, and the controlled browser tools for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. For JavaScript-required SPA pages, first call list_browsers, then browser_open with a compatible installed Chromium browser to obtain the rendered DOM and observed public sources. Prefer Chrome when it is installed; it is the default for web compatibility, with Edge as fallback. If browser rendering is unavailable or insufficient, use web_download on the page to inspect raw HTML, download referenced public static JS/source-map assets, and use search_downloaded_web_file or offset reads for minified files. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If retrieval fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
     : '\n\nPublic web access is OFF. Do not claim to have fetched public sources. If the task requires an external source, report that the Globe setting must be enabled or use supplied local material.';
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + explicitWebContext + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
