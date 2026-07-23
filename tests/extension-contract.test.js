@@ -127,6 +127,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /setPromptState\(promptId, 'read'\)/);
   assert.match(source, /queuedAgentRequests/);
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
+  assert.match(chatSource, /function formatShortTime/);
+  assert.match(chatSource, /class="user-message-meta"/);
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
   assert.match(source, /class="composer-hint"/);

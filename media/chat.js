@@ -160,6 +160,7 @@ function cancelQueuedAttachment(clientId) { const index = queuedAttachments.find
 function messageDate(value) { return new Date(value || Date.now()); }
 function timestampPart(value) { return String(value).padStart(2, '0'); }
 function formatTime(value) { const date = messageDate(value); return `${date.getFullYear()}-${timestampPart(date.getMonth() + 1)}-${timestampPart(date.getDate())} ${timestampPart(date.getHours())}:${timestampPart(date.getMinutes())}:${timestampPart(date.getSeconds())}`; }
+function formatShortTime(value) { const date = messageDate(value); return `${timestampPart(date.getHours())}:${timestampPart(date.getMinutes())}`; }
 function fullTimestamp(value) { return formatTime(value); }
 function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 28; }
 function persistScroll() { vscode.setState({ ...vscode.getState(), stickToBottom, scrollTop: chat.scrollTop, steeringMode, taskMode, taskUi, promptStates: [...promptStates] }); }
@@ -175,10 +176,12 @@ function add(kind, text, id, messageAttachments = [], scroll = true, createdAt, 
   let element = id && chat.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
   if (!element) { element = document.createElement('div'); element.className = 'message ' + kind; if (id) element.dataset.messageId = id; chat.appendChild(element); }
   element.className = 'message ' + kind;
-  element.innerHTML = (kind === 'assistant' || kind === 'user') ? `<time title="${escapeHtml(fullTimestamp(createdAt))}">${formatTime(createdAt)}</time>${messageReplyTo?.quote ? `<blockquote class="reply-reference">${escapeHtml(messageReplyTo.quote)}</blockquote>` : ''}${markdown(text)}${kind === 'assistant' ? sourceMarkup(messageAttachments) : ''}` : '';
+  const timestamp = `<time title="${escapeHtml(fullTimestamp(createdAt))}">${formatTime(createdAt)}</time>`;
+  const userMetadata = `<div class="user-message-meta"><time title="${escapeHtml(fullTimestamp(createdAt))}">${formatShortTime(createdAt)}</time></div>`;
+  element.innerHTML = (kind === 'assistant' || kind === 'user') ? `${kind === 'assistant' ? timestamp : ''}${messageReplyTo?.quote ? `<blockquote class="reply-reference">${escapeHtml(messageReplyTo.quote)}</blockquote>` : ''}${markdown(text)}${kind === 'assistant' ? sourceMarkup(messageAttachments) : ''}${kind === 'user' ? userMetadata : ''}` : '';
   if (kind !== 'assistant' && kind !== 'user') element.textContent = text;
   if (kind === 'user') element.insertAdjacentHTML('beforeend', attachmentMarkup(messageAttachments));
-  if (kind === 'user' && id) { const receipt = document.createElement('span'); receipt.className = 'message-receipt'; receipt.dataset.receiptId = id; element.appendChild(receipt); renderReceipt(id); }
+  if (kind === 'user' && id) { const receipt = document.createElement('span'); receipt.className = 'message-receipt'; receipt.dataset.receiptId = id; element.querySelector('.user-message-meta')?.appendChild(receipt); renderReceipt(id); }
   if (id && (kind === 'assistant' || kind === 'user')) { const actions = document.createElement('div'); actions.className = 'message-actions'; if (kind === 'assistant') { const copy = document.createElement('button'); copy.title = 'Copy Markdown'; copy.innerHTML = copySvg; copy.onclick = () => copyText(text); const reply = document.createElement('button'); reply.title = 'Reply to this response or selected text'; reply.innerHTML = replySvg; reply.onpointerdown = event => { reply._excerpt = selectedExcerpt(element); event.preventDefault(); }; reply.onclick = () => { replyTo = { id, quote: reply._excerpt || String(text).slice(0, 4000) }; renderReplyContext(); input.focus(); }; actions.append(copy, reply); } else { const edit = document.createElement('button'); edit.title = 'Edit and run this prompt again'; edit.innerHTML = pencilSvg; edit.onclick = () => { input.value = text; input.focus(); input.setSelectionRange(input.value.length, input.value.length); vscode.postMessage({ type: 'editMessage', id }); updateSubmit(); }; actions.append(edit); } const remove = document.createElement('button'); remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); actions.appendChild(remove); element.appendChild(actions); }
   if (shouldScroll) { element.scrollIntoView({ block: 'end' }); stickToBottom = true; persistScroll(); }
 }
