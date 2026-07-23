@@ -656,7 +656,23 @@ async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(u
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
 async function rememberWebSource(url, title) { try { const target = safeWebUrl(url); const existing = activeWebSources.find(item => item.url === target.toString()); if (existing) return existing; const source = { title: title || target.hostname, url: target.toString(), favicon: '' }; activeWebSources.push(source); try { const response = await fetch(new URL('/favicon.ico', target), { redirect: 'error', headers: { Accept: 'image/*', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); const data = Buffer.from(await response.arrayBuffer()); const type = response.headers.get('content-type') || 'image/x-icon'; if (response.ok && data.length && data.length <= 64 * 1024 && /^image\//i.test(type)) source.favicon = `data:${type};base64,${data.toString('base64')}`; } catch {} return source; } catch { return undefined; } }
 async function webSearch(query, limit) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const text = String(query || '').trim(); if (!text) return 'Provide a search query.'; const address = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(text)}`; const html = await fetchPublicWeb(address); const results = []; const pattern = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a|class="result__snippet"[^>]*>([\s\S]*?)<\/div/gi; let match; while ((match = pattern.exec(html)) && results.length < Math.max(1, Math.min(10, Number(limit) || 5))) { const href = match[1]; const title = webText(match[2]); const snippet = webText(match[3] || match[4] || ''); if (href && title) results.push(`${title}\n${href}\n${snippet}`); } return results.length ? results.join('\n\n') : 'No search results were parsed.'; }
-async function webFetch(url) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const target = safeWebUrl(url); const body = await fetchPublicWeb(target); await rememberWebSource(target, target.hostname); return truncate(webText(body), 14000); }
+function browserStaticResources(html, base) {
+  const resources = []; const pattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi; let match;
+  while ((match = pattern.exec(String(html || ''))) && resources.length < 40) {
+    try { const target = safeWebUrl(new URL(match[1], base)); if (!resources.includes(target.toString())) resources.push(target.toString()); } catch {}
+  }
+  return resources;
+}
+async function webFetch(url) {
+  if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.';
+  const target = safeWebUrl(url); const body = await fetchPublicWeb(target); const staticText = webText(body); await rememberWebSource(target, target.hostname);
+  if (!/\b(?:you need to enable javascript|enable javascript to run|javascript is required)\b/i.test(staticText)) return truncate(staticText, 14000);
+  // This branch is host-managed so a model cannot abandon JavaScript research
+  // merely because the initial lightweight fetch returned an SPA shell.
+  const rendered = await browserOpen(target.toString(), 'chrome', 8000);
+  if (/^Tool error:/i.test(rendered)) return `The initial fetch returned a JavaScript-required shell. Automatic browser rendering also failed:\n${rendered}`;
+  return `The initial fetch returned a JavaScript-required shell. The extension automatically rendered it with the controlled browser; use the rendered DOM and discovered resources below, then inspect relevant source bundles with web_download and search_downloaded_web_file.\n\n${rendered}`;
+}
 function downloadedWebFileName(target, response) {
   const disposition = String(response.headers.get('content-disposition') || '');
   const supplied = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i)?.[1] || path.basename(target.pathname) || 'download';
@@ -698,9 +714,11 @@ async function browserOpen(url, browserId, waitMs) {
     try {
       const page = await renderPage(browser, target.toString(), waitMs); const dom = webText(page.html);
       if (!dom) { attempts.push(`${browser.name}: empty rendered DOM`); continue; }
-      await rememberWebSource(target, target.hostname); for (const observed of page.observedUrls.slice(0, 40)) await rememberWebSource(observed, new URL(observed).hostname);
+      const resources = browserStaticResources(page.html, target); const sources = [...new Set([...page.observedUrls, ...resources])];
+      await rememberWebSource(target, target.hostname); for (const observed of sources.slice(0, 40)) await rememberWebSource(observed, new URL(observed).hostname);
       const fallback = preferred && preferred.id !== browser.id ? ` ${preferred.name} produced no usable DOM, so the host retried with ${browser.name}.` : '';
-      return `Rendered with ${browser.name}.${fallback} Observed ${page.observedUrls.length} public network destination(s).\n\n${truncate(dom, 50000)}`;
+      const resourceList = resources.length ? `\n\nDiscovered static resources (download these when relevant):\n${resources.map(item => `- ${item}`).join('\n')}` : '';
+      return `Rendered with ${browser.name}.${fallback} Observed ${page.observedUrls.length} public network destination(s).${resourceList}\n\n${truncate(dom, 50000)}`;
     } catch (error) { attempts.push(`${browser.name}: ${String(error.message || error).split('\n')[0]}`); }
   }
   return `Tool error: no installed headless browser produced a usable DOM for ${target}. Attempts: ${attempts.join('; ')}. This does not prove that the website is unavailable; use web_download to inspect its static assets or retry a compatible browser.`;

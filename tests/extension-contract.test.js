@@ -245,14 +245,16 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Prefer Chrome when it is installed/);
   assert.match(source, /no installed headless browser produced a usable DOM/);
   assert.match(source, /produced no usable DOM, so the host retried/);
+  assert.match(source, /automatically rendered it with the controlled browser/);
+  assert.match(source, /function browserStaticResources/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
   assert.match(browserSource, /function createFilteringProxy/);
   assert.match(browserSource, /async function publicAddress/);
   assert.match(browserSource, /--proxy-server=http:\/\/127\.0\.0\.1/);
   assert.match(browserSource, /Private browser destination is blocked/);
   assert.match(source, /activeWebDownloads = new Map\(\)/);
-  assert.match(source, /const body = await fetchPublicWeb\(target\); await rememberWebSource\(target, target\.hostname\)/);
-  assert.doesNotMatch(source, /await rememberWebSource\(target, target\.hostname\); return truncate\(webText\(await fetchPublicWeb\(target\)\)/);
+  assert.match(source, /const body = await fetchPublicWeb\(target\); const staticText = webText\(body\); await rememberWebSource\(target, target\.hostname\)/);
+  assert.match(source, /const rendered = await browserOpen\(target\.toString\(\), 'chrome', 8000\)/);
   assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);
   assert.match(source, /Present REST\/GraphQL-style tradeoffs as conditional analysis/i);
   assert.match(source, /workerTokenKey/);
