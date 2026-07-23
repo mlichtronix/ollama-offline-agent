@@ -138,7 +138,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /message\.editId/);
   assert.match(source, /if \(replacedBranch\) chatProvider\?\.replay\(\)/);
   assert.match(source, /function resolveWindowsCommandShell/);
-  assert.match(source, /cp\.execFile\(windowsShell\.executable/);
+  assert.match(source, /function resolvePosixCommandShell/);
+  assert.match(source, /function detectExecutionEnvironment/);
+  assert.match(source, /executionEnvironment = detectExecutionEnvironment\(\)/);
+  assert.match(source, /cp\.execFile\(runner\.executable/);
   assert.match(source, /'-NoProfile', '-NonInteractive'/);
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
