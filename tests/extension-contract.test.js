@@ -192,6 +192,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function workerRuntimeForAssignment/);
   assert.match(source, /function readOnlyWorkerViolation/);
   assert.match(source, /function workerResultUsable/);
+  assert.match(source, /function isDirectAgentQuestion/);
+  assert.match(source, /Worker delegation skipped: this is a direct question/);
+  assert.match(source, /workerIdleTimeoutMs/);
+  assert.match(source, /The master will continue without this expert report/);
   assert.match(source, /Retrying \$\{assignment\.role\} on compatible worker/);
   assert.match(source, /No compatible worker could complete/);
   assert.match(source, /No safe compatible installed model for this assignment/);
@@ -204,6 +208,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(ollamaClientSource, /async benchmark\(model, signal\)/);
   assert.match(workerPoolSource, /async health\(\{ benchmark = false, signal \} = \{\}\)/);
   assert.match(workerPoolSource, /modelProfiles/);
+  assert.match(workerPoolSource, /function chatWithIdleTimeout/);
+  assert.match(workerPoolSource, /Worker timed out after/);
   assert.match(source, /const activeAbortControllers = new Set\(\)/);
   assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
   assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);

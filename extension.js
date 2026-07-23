@@ -481,6 +481,7 @@ function readOnlyWorkerViolation(task) {
   const patterns = [
     /\b(?:run|execute|launch|invoke)\b[\s\S]{0,48}\b(?:command|shell|terminal|bandit|ruff|pytest|tests?|lint|build|compile|pip|npm|git)\b/i,
     /\b(?:install|uninstall|write|create|modify|edit|delete|rename|move)\b[\s\S]{0,48}\b(?:files?|code|scripts?|scanner|skills?|playbook|packages?|dependenc)/i,
+    /\b(?:display|show|post|publish|render)\b[\s\S]{0,48}\b(?:response|chat|user|conversation)\b/i,
     /\b(?:git\s+(?:commit|push|pull|checkout|merge)|npm\s+(?:install|test|run)|pip\s+install)\b/i
   ];
   return patterns.find(pattern => pattern.test(text))?.source;
@@ -558,7 +559,7 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
       updateTaskWorkers(1, plan.assignments.length);
       let retry;
       const retryAssignment = { ...assignment, workerId: worker.id };
-      try { retry = await workerPool.delegate(task, { health: runtimeHealth([retryAssignment]), assignments: [retryAssignment], initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
+      try { retry = await workerPool.delegate(task, { health: runtimeHealth([retryAssignment]), assignments: [retryAssignment], initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, workerTimeoutMs: workerIdleTimeoutMs(), signal }); }
       finally { updateTaskWorkers(0, plan.assignments.length); }
       const result = retry.results[0];
       if (!result) continue;
@@ -569,7 +570,16 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
   };
   while (pending.size) {
     const ready = [...pending.values()].filter(item => (item.dependsOn || []).every(id => workerResultUsable(assignmentResult(results, id))));
-    if (!ready.length) throw new Error('Worker dependency plan contains an unresolved cycle.');
+    if (!ready.length) {
+      const blocked = [...pending.values()].filter(item => (item.dependsOn || []).some(id => assignmentResult(results, id)));
+      if (!blocked.length) throw new Error('Worker dependency plan contains an unresolved cycle.');
+      for (const assignment of blocked) {
+        pending.delete(assignment.workerId);
+        const prerequisites = (assignment.dependsOn || []).filter(id => !workerResultUsable(assignmentResult(results, id))).join(', ');
+        results.push({ worker: health.find(worker => worker.id === assignment.workerId) || { id: assignment.workerId, name: assignment.workerId }, role: assignment.role, task: assignment.task, error: `Skipped because prerequisite worker report(s) failed: ${prerequisites}.` });
+      }
+      continue;
+    }
     const assignments = ready.map(item => {
       const dependencies = (item.dependsOn || []).map(id => assignmentResult(results, id)).filter(workerResultUsable);
       let remaining = 12000;
@@ -586,7 +596,7 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
     }
     updateTaskWorkers(assignments.length, plan.assignments.length);
     let dispatch;
-    try { dispatch = await workerPool.delegate(task, { health: selectedHealth, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
+    try { dispatch = await workerPool.delegate(task, { health: selectedHealth, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, workerTimeoutMs: workerIdleTimeoutMs(), signal }); }
     finally { updateTaskWorkers(0, plan.assignments.length); }
     results.push(...dispatch.results);
     for (const item of ready) pending.delete(item.workerId);
@@ -602,7 +612,8 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
       const replacement = await retryAssignment(dispatchedAssignment, result || { worker: { name: 'the assigned worker' } });
       if (!workerResultUsable(replacement)) {
         const requirements = (assignment.requires || []).join(', ') || 'read-only project analysis';
-        throw new Error(`No compatible worker could complete the ${assignment.role} assignment after ${result?.worker?.name || 'the assigned worker'} failed or declined. Required capabilities: ${requirements}. Add or enable a suitable worker, then retry.`);
+        log(`No compatible worker could complete the optional ${assignment.role} assignment after ${result?.worker?.name || 'the assigned worker'} failed or declined. Required capabilities: ${requirements}. The master will continue without this expert report.`);
+        updateTaskUi('research', 'active', `Expert report unavailable for ${assignment.role}; continuing with the master task.`);
       }
     }
   }
@@ -898,6 +909,7 @@ function runCommand(command, requestedCwd) {
 function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
 function isEndpointLimitError(error) { return /(?:\b429\b|usage limit|rate limit|quota|too many requests|credits? (?:have )?been exhausted)/i.test(String(error?.message || error)); }
 function workerSpeed(worker) { return Number(worker?.profile?.benchmark?.tokensPerSecond || workerBenchmarks.get(worker?.id)?.benchmark?.tokensPerSecond || 0); }
+function workerIdleTimeoutMs() { return Math.max(0, Math.min(3600, Number(config().get('workerIdleTimeoutSeconds', 300)) || 0)) * 1000; }
 function masterRuntimeKey(runtime = {}) { return `${normalizeEndpoint(runtime.endpoint || config().get('endpoint'))}\n${String(runtime.model || config().get('model') || '').trim()}`; }
 function fallbackMasterCandidates(health, { needsVision = false } = {}) {
   const requestedContext = Number(config().get('contextWindow', 0)); const primaryEndpoint = normalizeEndpoint(config().get('endpoint')); const primaryModel = String(config().get('model') || '').trim();
@@ -980,6 +992,13 @@ function isTestCommand(call) {
   try { const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; return /\b(test|tests|pytest|jest|vitest|mocha|ctest|dotnet\s+test|cargo\s+test|go\s+test)\b/i.test(args.command || ''); } catch { return false; }
 }
 function testFailed(result) { return /^Exit\/error:/m.test(String(result)); }
+function isDirectAgentQuestion(task) {
+  const text = String(task || '').trim();
+  const looksLikeQuestion = /\?$/.test(text) || /^(?:prečo|why|ako|how|čo|what|kde|where|môžeš|vieš|can|does|is)\b/i.test(text);
+  const agentSubject = /\b(?:agent|plugin|extension|worker|model|tool|nástroj|odpoveď|response|chat|konverzáci|históri)/i.test(text);
+  const requestedWork = /\b(?:implement|oprav|fix|create|vytvor|napíš|write|run|spusť|test|analyz|research|preskúmaj|migr|compare)\b/i.test(text);
+  return looksLikeQuestion && agentSubject && !requestedWork;
+}
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
@@ -1013,6 +1032,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (images.length) userMessage.images = images;
   await configuredModel();
   let workerContext = ''; const masterSession = { current: {}, fallbacks: [], limitedKeys: new Set() };
+  const directAgentQuestion = isDirectAgentQuestion(taskWithResources);
   if (configuredWorkers().some(worker => worker.enabled)) {
     if (!continuationMessages) { updateTaskUi('research', 'active', 'Checking available expert workers.'); log('Checking configured read-only workers before starting the master task.'); }
     const workerController = createActiveAbortController();
@@ -1023,7 +1043,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     masterSession.fallbacks = fallbackMasterCandidates(health, { needsVision: images.length > 0 });
     if (masterSession.fallbacks.length) log(`Master failover candidates: ${masterSession.fallbacks.map(worker => `${worker.name} (${worker.model}${workerSpeed(worker) ? `, ${workerSpeed(worker)} tok/s` : ''})`).join(', ')}.`);
     if (!continuationMessages) for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
-    if (!continuationMessages && available.length) {
+    if (!continuationMessages && available.length && !directAgentQuestion) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
       const maxWorkerTasks = available.length;
       const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, lastUser, maxWorkerTasks, masterSession);
@@ -1045,7 +1065,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const workerCapacity = '\n\nDelegation capacity: ' + plan.assignments.length + ' assignment(s) were selected from ' + available.length + ' available worker(s), with a configured maximum of ' + maxWorkerTasks + '. A requested maximum is an upper bound, not missing work. Do not claim that unassigned expert roles were required or missing.';
       if (dispatch.results.length) workerContext = workerCapacity + workerDispatchContext(dispatch.results) + `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
     }
-    if (!continuationMessages) { updateTaskUi('research', 'complete', 'Expert-worker research phase completed.'); postUi('workerHealth', { workers: health }); }
+    if (!continuationMessages && directAgentQuestion) log('Worker delegation skipped: this is a direct question about agent behavior and does not need independent research.');
+    if (!continuationMessages) { updateTaskUi('research', 'complete', directAgentQuestion ? 'Worker research skipped for a direct agent question.' : 'Expert-worker research phase completed.'); postUi('workerHealth', { workers: health }); }
   }
   const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
