@@ -209,6 +209,9 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /Plan mode is read-only/);
   assert.match(source, /const taskTools = taskMode === 'execute'/);
   assert.match(source, /function updateTaskUi/);
+  assert.match(source, /activeTaskUi\.activity/);
+  assert.match(source, /function updateTaskWorkers/);
+  assert.match(source, /updateTaskWorkers\(assignments\.length/);
   assert.match(source, /recordTaskFile/);
   assert.match(source, /recordTaskCheck/);
   assert.match(source, /function diffLineStats/);
@@ -237,10 +240,14 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatSource, /data-task-diff/);
   assert.match(chatSource, /review-summary/);
   assert.match(chatSource, /<details class="review-checks"/);
+  assert.match(chatSource, /<details class="review-files"/);
+  assert.match(chatSource, /<details class="task-activity"/);
+  assert.match(chatSource, /worker\$\{activeWorkers/);
   assert.match(chatSource, /const undoSvg/);
   assert.match(chatSource, /class="task-undo"/);
   assert.match(chatStyles, /\.task-panel/);
   assert.match(chatStyles, /\.task-review/);
+  assert.match(chatStyles, /\.task-activity/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {

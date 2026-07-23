@@ -164,6 +164,17 @@ function updateTaskUi(phase, status = 'active', detail = '') {
   const item = existing || { phase, status, detail };
   item.status = status; if (detail) item.detail = detail;
   if (!existing) activeTaskUi.timeline.push(item);
+  if (detail) {
+    activeTaskUi.activity ||= [];
+    const previous = activeTaskUi.activity.at(-1);
+    if (!previous || previous.phase !== phase || previous.status !== status || previous.detail !== detail) activeTaskUi.activity.push({ phase, status, detail, at: new Date().toISOString() });
+    if (activeTaskUi.activity.length > 30) activeTaskUi.activity.splice(0, activeTaskUi.activity.length - 30);
+  }
+  postUi('taskUi', activeTaskUi);
+}
+function updateTaskWorkers(active, total = active) {
+  if (!activeTaskUi) return;
+  activeTaskUi.workers = { active: Math.max(0, Number(active) || 0), total: Math.max(0, Number(total) || 0) };
   postUi('taskUi', activeTaskUi);
 }
 function diffLineStats(before, after) {
@@ -453,7 +464,10 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
       return { ...item, task: item.task + context };
     });
     throwIfCancelled();
-    const dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal });
+    updateTaskWorkers(assignments.length, plan.assignments.length);
+    let dispatch;
+    try { dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
+    finally { updateTaskWorkers(0, plan.assignments.length); }
     results.push(...dispatch.results);
     for (const item of ready) pending.delete(item.workerId);
   }
@@ -790,7 +804,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (!task) return;
   await ensureWorkspaceState();
   const taskMode = ['ask', 'plan', 'execute'].includes(requestedMode) ? requestedMode : 'execute';
-  activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], files: [], checks: [], canRestore: false };
+  activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], activity: [], workers: { active: 0, total: 0 }, files: [], checks: [], canRestore: false };
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts. Create, edit, and delete operations for non-sensitive files physically inside the open workspace run autonomously with rollback checkpoints. Writes outside the workspace, sensitive files, restores, and playbook saves still require approval; destructive system commands remain blocked.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
