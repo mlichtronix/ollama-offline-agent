@@ -15,7 +15,7 @@ The extension is **offline-first**: it remains functional without a network conn
 - File and image attachments through drag and drop or the paperclip control.
 - Public-web search and page retrieval, explicitly enabled with the **Globe** control. Sources used for an answer are shown below it, retained in local history, and show either their favicon or a globe fallback.
 - Local model selection, model download by name, response language selection, temperature, and context-window controls.
-- Workspace, guarded system, and full system access modes. Writes and commands require explicit user approval.
+- Workspace, guarded system, and full system access modes. Full system mode can autonomously change ordinary project files while retaining checkpoints.
 - **Steer** and **Queue** modes for follow-up instructions while the agent is working.
 - Optional parallel Ollama workers for independent research before the master agent begins execution.
 - Markdown tables and fenced code blocks, including lightweight Lua syntax highlighting for ` ```lua ` blocks.
@@ -88,9 +88,9 @@ Workers cannot write files, run shell commands, change Git state, install softwa
 | --- | --- |
 | Workspace | File operations and commands are limited to the open workspace. |
 | Guarded system | Absolute paths are available; protected system locations remain blocked. |
-| Full system | Paths accessible to the current Windows user, including local installers, are available after explicit approval. Destructive command guardrails remain active. |
+| Full system | Safe commands and local installers run without repeated prompts. Non-sensitive files physically inside the open workspace can be created, changed, and deleted autonomously with checkpoints; writes outside the workspace remain approved. Destructive command guardrails remain active. |
 
-Every file write, command execution, and playbook save requires confirmation. Review each approval carefully, especially in full system mode.
+In Workspace and Guarded system modes, writes and commands require confirmation. In Full system mode, ordinary project-local file changes and safe commands proceed without repeated prompts; sensitive files, writes outside the workspace, restores, and playbook saves remain confirmed. Review the recorded Output diff and checkpoints carefully.
 
 Before an agent file write, the extension records a local checkpoint and writes a concise diff preview to the Output channel. The agent can request restoration of its most recent file change; restoration also requires confirmation.
 

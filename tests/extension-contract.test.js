@@ -222,6 +222,12 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /if \(!fullSystem\(\) && !approvedCommands\.has\(approvalKey\)\)/);
   assert.match(source, /name: 'delete_file'/);
   assert.match(source, /Deletion is limited to a file inside the current workspace/);
+  assert.match(source, /function canAutonomouslyMutateWorkspace/);
+  assert.match(source, /if \(!canAutonomouslyMutateWorkspace\(target\)\)/);
+  assert.match(source, /function isEndpointLimitError/);
+  assert.match(source, /function fallbackMasterCandidates/);
+  assert.match(source, /chatWithMasterFailover/);
+  assert.match(source, /Master endpoint limit detected/);
   assert.match(source, /type: 'taskUi'/);
   assert.match(chatSource, /data-task-mode/);
   assert.match(chatSource, /message-receipt/);

@@ -61,7 +61,7 @@ const SYSTEM = `You are an offline coding agent operating through a VS Code exte
 
 Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For an inspection or change, identify the smallest relevant set of files/resources, inspect those, form a short internal plan, implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. The most recent assistant answer is always supplied as candidate context. First decide whether it is relevant and sufficient for the newest request. If it is not sufficient, use search_chat_history with a semantic query, then read_chat_messages for only the IDs you need before giving a generic answer. Refine or repeat this as needed; never assume only recent history is relevant. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. When researching the web, search results and remembered URLs are leads only: cite a URL as a source only after web_fetch successfully returned that exact page in this task. Do not cite a failed fetch, guessed path, or model-memory URL. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
 
-The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; optional web search and public web-page retrieval with explicit user approval; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. Web tools are not available without network access and must never be used for private, local, or LAN addresses. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. Never claim you ran a tool you did not call. The host asks the user before writes, commands, web access, and saving playbooks; if an action is denied, adapt your plan. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
+The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; optional web search and public web-page retrieval with explicit user approval; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. Web tools are not available without network access and must never be used for private, local, or LAN addresses. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. Never claim you ran a tool you did not call. In Full system mode, normal create, edit, and delete operations on non-sensitive files physically inside the open workspace proceed autonomously with checkpoints; writes outside it, sensitive files, and playbook saves still require approval. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
 
 function log(text) { output.appendLine(text); }
 function escapeExportHtml(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
@@ -267,6 +267,18 @@ function root() { return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath; }
 function systemAccess() { return config().get('accessMode') !== 'workspace'; }
 function guardedSystem() { return config().get('accessMode') === 'guardedSystem'; }
 function fullSystem() { return config().get('accessMode') === 'fullSystem'; }
+function isWorkspaceTarget(target) {
+  const workspace = root(); if (!workspace || !target) return false;
+  const relative = path.relative(workspace, target);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  try {
+    const realWorkspace = fs.realpathSync.native(workspace); let probe = target;
+    while (!fs.existsSync(probe)) { const parent = path.dirname(probe); if (parent === probe) break; probe = parent; }
+    const realProbe = fs.realpathSync.native(probe); const prefix = realWorkspace.endsWith(path.sep) ? realWorkspace : realWorkspace + path.sep;
+    return realProbe === realWorkspace || realProbe.startsWith(prefix);
+  } catch { return false; }
+}
+function canAutonomouslyMutateWorkspace(target) { return fullSystem() && isWorkspaceTarget(target) && !isSensitiveTarget(target) && !matchesProtected(target); }
 function resolveTarget(input) {
   const base = root();
   if (!base) throw new Error('Open a folder workspace before using the agent.');
@@ -447,20 +459,19 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
   }
   return { health, results };
 }
-async function planWorkerAssignments(task, workers, lastAssistant, maxTasks) {
+async function planWorkerAssignments(task, workers, lastAssistant, maxTasks, masterSession) {
   const fallback = fallbackWorkerPlan(workers, maxTasks);
   const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}; runtime profile: ${workerCapabilityDescription(worker)}`).join('\n');
   const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Never assign image analysis without vision, tool-dependent research without tool_calling, large source/context analysis without an adequate context requirement, or latency-sensitive/long-running work without fast_inference. Write masterFocus, role, task, and requires in English so every worker receives an English assignment while preserving all user constraints. requires must contain every capability needed, selected only from: ${[...workerRequirementNames].join(', ')}. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"...","requires":["project_files","tool_calling"]}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
   const plannerGraph = ' First decide whether delegation is worthwhile. For a direct, narrow, or low-risk task return delegate:false, a short delegationReason, and no assignments. Otherwise return delegate:true, a short delegationReason, and no more than ' + maxTasks + ' assignments. An explicit user maximum is an upper bound, not a requirement to use that many workers. When there are fewer workers than explicitly requested expert topics, consolidate those requested topics into the available worker assignments instead of substituting generic roles. Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
-  const controller = createActiveAbortController();
   try {
-    const response = await ollama.chat({ model: await configuredModel(), messages: [{ role: 'system', content: plannerSystem + plannerGraph }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], tools: [], temperature: 0.1, contextWindow: Number(config().get('contextWindow', 0)), signal: controller.signal, onThinkingUnsupported: model => log(`Planner model ${model} does not support thinking; continuing without it.`) });
+    const response = await chatWithMasterFailover([{ role: 'system', content: plannerSystem + plannerGraph }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], undefined, [], masterSession);
     return parseDelegationPlan(response.message?.content, workers, maxTasks) || fallback;
   } catch (error) {
     if (error.name === 'AbortError') throw error;
     log(`Worker planner failed (${error.message}); using distinct fallback specialist roles.`);
     return fallback;
-  } finally { releaseActiveAbortController(controller); }
+  }
 }
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
@@ -566,8 +577,8 @@ const tools = [
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. Requires user approval; protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
-  { type: 'function', function: { name: 'delete_file', description: 'Delete one file in the current workspace. Available only in Full system mode and always requires explicit approval. The agent creates a local checkpoint first.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+  { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. In Full system mode, project-local non-sensitive changes proceed without confirmation; other writes require user approval. Protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+  { type: 'function', function: { name: 'delete_file', description: 'Delete one file in the current workspace. Available only in Full system mode. Project-local non-sensitive deletions proceed without confirmation and retain a rollback checkpoint.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'rollback_last_change', description: 'Restore the most recent file change made by the agent from a local checkpoint. Requires user approval.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'run_command', description: 'Run a command. Requires user approval; destructive system commands are blocked. In system access modes cwd can be an absolute path. Full system mode also permits user-accessible local application installers.', parameters: { type: 'object', properties: { command: { type: 'string' }, cwd: { type: 'string' } }, required: ['command'] } } },
   { type: 'function', function: { name: 'git_status', description: 'Read the current Git branch and working-tree status. No changes are made.', parameters: { type: 'object', properties: {} } } },
@@ -611,12 +622,14 @@ async function executeTool(call) {
     if (call.function.name === 'web_search') return await webSearch(args.query, args.maxResults);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
     if (call.function.name === 'write_file') {
-      updateTaskUi('implement', 'active', 'Applying an approved workspace change.');
+      updateTaskUi('implement', 'active', 'Applying workspace change.');
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
       let before = ''; try { before = await fsp.readFile(target, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       log(`Proposed diff for ${args.path}:\n${writePreview(before, args.content)}`);
-      const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
-      if (answer !== 'Allow') return 'User denied file write.';
+      if (!canAutonomouslyMutateWorkspace(target)) {
+        const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
+        if (answer !== 'Allow') return 'User denied file write.';
+      }
       const priorTaskFile = activeTaskUi?.files.find(item => item.path === args.path);
       let reviewBase = before;
       if (priorTaskFile?.existed && priorTaskFile.snapshot) { try { reviewBase = await fsp.readFile(priorTaskFile.snapshot, 'utf8'); } catch {} }
@@ -632,8 +645,10 @@ async function executeTool(call) {
       const info = await fsp.stat(target).catch(error => error.code === 'ENOENT' ? undefined : Promise.reject(error));
       if (!info) return `File does not exist: ${args.path}`;
       if (!info.isFile()) return 'Deletion is limited to individual files; directories are not supported.';
-      const answer = await vscode.window.showWarningMessage(`Agent wants to delete ${target}. A rollback checkpoint will be kept.`, { modal: true }, 'Delete file');
-      if (answer !== 'Delete file') return 'User denied file deletion.';
+      if (!canAutonomouslyMutateWorkspace(target)) {
+        const answer = await vscode.window.showWarningMessage(`Agent wants to delete ${target}. A rollback checkpoint will be kept.`, { modal: true }, 'Delete file');
+        if (answer !== 'Delete file') return 'User denied file deletion.';
+      }
       const before = await fsp.readFile(target, 'utf8'); const checkpoint = await createCheckpoint(target); await fsp.unlink(target);
       recordTaskFile(args.path, checkpoint, diffLineStats(before, ''), { deleted: true });
       return `Deleted ${args.path}. Checkpoint: ${checkpoint.createdAt}.`;
@@ -685,13 +700,35 @@ function runCommand(command, requestedCwd) {
   });
 }
 function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
-async function chat(messages, onChunk, taskTools = tools) {
+function isEndpointLimitError(error) { return /(?:\b429\b|usage limit|rate limit|quota|too many requests|credits? (?:have )?been exhausted)/i.test(String(error?.message || error)); }
+function workerSpeed(worker) { return Number(worker?.profile?.benchmark?.tokensPerSecond || workerBenchmarks.get(worker?.id)?.benchmark?.tokensPerSecond || 0); }
+function fallbackMasterCandidates(health, { needsVision = false } = {}) {
+  const requestedContext = Number(config().get('contextWindow', 0)); const primaryEndpoint = normalizeEndpoint(config().get('endpoint')); const primaryModel = String(config().get('model') || '').trim();
+  return health.filter(worker => worker.status === 'available').filter(worker => !(normalizeEndpoint(worker.endpoint) === primaryEndpoint && worker.model === primaryModel)).filter(worker => !needsVision || (worker.profile?.capabilities || []).map(value => String(value).toLowerCase()).includes('vision')).filter(worker => !requestedContext || !worker.profile?.contextLength || Number(worker.profile.contextLength) >= requestedContext).sort((left, right) => workerSpeed(right) - workerSpeed(left) || left.name.localeCompare(right.name));
+}
+function masterRuntimeForWorker(worker) { return { client: workerPool.client(worker), model: worker.model, name: worker.name, endpoint: worker.endpoint, contextWindow: Number(config().get('contextWindow', 0)) }; }
+async function chatWithMasterFailover(messages, onChunk, taskTools, session) {
+  let streamedContent = '';
+  for (;;) {
+    try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current); }
+    catch (error) {
+      if (!isEndpointLimitError(error) || !session.fallbacks.length) throw error;
+      if (streamedContent) messages.push({ role: 'assistant', content: streamedContent });
+      const worker = session.fallbacks.shift(); session.current = masterRuntimeForWorker(worker);
+      const speed = workerSpeed(worker); const speedText = speed ? ` at ${speed} tok/s` : '';
+      log(`Master endpoint limit detected (${error.message}). Continuing on worker ${worker.name} (${worker.model})${speedText}.`);
+      updateTaskUi('continue', 'active', `Master limit reached; continuing on ${worker.name}.`);
+      streamedContent = '';
+    }
+  }
+}
+async function chat(messages, onChunk, taskTools = tools, runtime = {}) {
   const controller = createActiveAbortController();
   try {
-    return await ollama.chat({
-      model: config().get('model'), messages, tools: taskTools,
+    return await (runtime.client || ollama).chat({
+      model: runtime.model || config().get('model'), messages, tools: taskTools,
       temperature: Number(config().get('temperature', 0.2)),
-      contextWindow: Number(config().get('contextWindow', 0)),
+      contextWindow: Number(runtime.contextWindow ?? config().get('contextWindow', 0)),
       signal: controller.signal, onChunk,
       onThinkingUnsupported: model => log(`Model ${model} does not support thinking; continuing without it.`)
     });
@@ -756,7 +793,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], files: [], checks: [], canRestore: false };
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
-  const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts; destructive system commands remain blocked, while file writes and restores still require explicit approval.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
+  const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts. Create, edit, and delete operations for non-sensitive files physically inside the open workspace run autonomously with rollback checkpoints. Writes outside the workspace, sensitive files, restores, and playbook saves still require approval; destructive system commands remain blocked.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
   const lastAssistant = latestAssistantContext();
   log(lastAssistant ? 'Context: the previous assistant answer was supplied as candidate context; older history is available on demand.' : 'Context: no previous assistant answer is available; complete local history is searchable on demand.');
   // Bind uploads to this exact prompt. A resource that is merely selected is
@@ -775,20 +812,21 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  let workerContext = '';
-  if (!continuationMessages && configuredWorkers().some(worker => worker.enabled)) {
-    updateTaskUi('research', 'active', 'Checking available expert workers.');
-    log('Checking configured read-only workers before starting the master task.');
+  let workerContext = ''; const masterSession = { current: {}, fallbacks: [] };
+  if (configuredWorkers().some(worker => worker.enabled)) {
+    if (!continuationMessages) { updateTaskUi('research', 'active', 'Checking available expert workers.'); log('Checking configured read-only workers before starting the master task.'); }
     const workerController = createActiveAbortController();
     let health;
     try { health = await workerPool.health({ signal: workerController.signal }); }
     finally { releaseActiveAbortController(workerController); }
     throwIfCancelled(); const available = health.filter(worker => worker.status === 'available');
-    for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
-    if (available.length) {
+    masterSession.fallbacks = fallbackMasterCandidates(health, { needsVision: images.length > 0 });
+    if (masterSession.fallbacks.length) log(`Master failover candidates: ${masterSession.fallbacks.map(worker => `${worker.name} (${worker.model}${workerSpeed(worker) ? `, ${workerSpeed(worker)} tok/s` : ''})`).join(', ')}.`);
+    if (!continuationMessages) for (const worker of health) log(`Worker ${worker.name}: ${worker.status}${worker.error ? ` (${worker.error})` : ''}`);
+    if (!continuationMessages && available.length) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
       const maxWorkerTasks = available.length;
-      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks);
+      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks, masterSession);
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
       if (!plan.assignments.length) log('Worker delegation skipped: ' + plan.delegationReason);
       throwIfCancelled();
@@ -802,8 +840,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const workerCapacity = '\n\nDelegation capacity: ' + plan.assignments.length + ' assignment(s) were selected from ' + available.length + ' available worker(s), with a configured maximum of ' + maxWorkerTasks + '. A requested maximum is an upper bound, not missing work. Do not claim that unassigned expert roles were required or missing.';
       if (dispatch.results.length) workerContext = workerCapacity + workerDispatchContext(dispatch.results) + `\n\nThe extension host already dispatched the worker assignments before this master turn. Worker delegation is host-managed, not a model-callable tool: do not claim that workers are unavailable merely because you do not see a delegate_task tool, and do not tell the user to assign work through another UI. Treat the reports below as the completed worker phase.\n\nMaster responsibility after delegation: ${plan.masterFocus}\nDo not repeat delegated research unless needed to validate it. Before repeating a worker’s time-sensitive factual claim, apply the evidence policy in the findings handoff.` + workerFindingsContext(dispatch.results);
     }
-    updateTaskUi('research', 'complete', 'Expert-worker research phase completed.');
-    postUi('workerHealth', { workers: health });
+    if (!continuationMessages) { updateTaskUi('research', 'complete', 'Expert-worker research phase completed.'); postUi('workerHealth', { workers: health }); }
   }
   const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
@@ -818,7 +855,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const streamId = messageId(); let thinkingStarted = false;
       updateTaskUi(step === 1 ? 'analyze' : 'continue', 'active', step === 1 ? 'Analyzing evidence and choosing the next action.' : `Continuing agent work (step ${step}).`);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
-      const data = await chat(messages, partial => {
+      const data = await chatWithMasterFailover(messages, partial => {
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
         if (partial.content) {
@@ -826,7 +863,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           stream.text += partial.content; activeStreams.set(streamId, stream);
           postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
         }
-      }, taskTools);
+      }, taskTools, masterSession);
       if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
@@ -841,7 +878,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const response = message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
+        const streamedResponse = activeStreams.get(streamId)?.text; const response = streamedResponse || message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });
@@ -908,7 +945,7 @@ function selectModel() { postUi('openSettings', { menu: 'model' }); }
 async function setAccessMode(value) {
   if (!['workspace', 'guardedSystem', 'fullSystem'].includes(value)) return;
   if (value === 'fullSystem') {
-    const confirmed = await vscode.window.showWarningMessage('Full system mode allows safe commands anywhere accessible to your Windows account, including installers, without repeated command prompts. Destructive system commands remain blocked; file writes and restores still require approval.', { modal: true }, 'Enable Full System');
+    const confirmed = await vscode.window.showWarningMessage('Full system mode allows safe commands anywhere accessible to your Windows account, including installers, without repeated command prompts. Non-sensitive file changes inside the open workspace proceed autonomously with rollback checkpoints. Destructive system commands remain blocked; writes outside the workspace, sensitive files, restores, and playbook saves still require approval.', { modal: true }, 'Enable Full System');
     if (confirmed !== 'Enable Full System') return;
   }
   await config().update('accessMode', value, vscode.ConfigurationTarget.Global); await publishSettings();
