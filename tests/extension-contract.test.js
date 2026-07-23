@@ -83,7 +83,8 @@ test('chat store persists UTF-8 history and matching conversation context', asyn
     assert.equal(restored.history[0].text, 'Zadanie: over UTF-8');
     assert.equal(restored.latestUser().content, 'Zadanie: over UTF-8');
     assert.equal(restored.latestAssistant().content, 'Výsledok je správny.');
-    assert.equal(restored.remove('assistant-1').kind, 'assistant');
+    assert.equal(restored.removeFrom(user.id).length, 2);
+    assert.equal(restored.history.length, 0);
     await restored.save();
   } finally {
     await fs.promises.rm(workspace, { recursive: true, force: true });
@@ -130,6 +131,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(chatSource, /function formatShortTime/);
   assert.match(chatSource, /class="user-message-meta"/);
   assert.match(chatSource, /element\.querySelector\('\.user-message-meta'\)/);
+  assert.match(chatSource, /let editingMessageId/);
+  assert.match(chatSource, /const editId = editingMessageId/);
+  assert.doesNotMatch(chatSource, /type: 'editMessage'/);
+  assert.match(source, /function replaceChatBranch/);
+  assert.match(source, /message\.editId/);
+  assert.match(source, /if \(replacedBranch\) chatProvider\?\.replay\(\)/);
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
   assert.match(source, /class="composer-hint"/);

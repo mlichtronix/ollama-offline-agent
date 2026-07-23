@@ -18,6 +18,7 @@ let taskMode = ['ask', 'plan', 'execute'].includes(restoredState.taskMode) ? res
 let taskUi = restoredState.taskUi || undefined;
 const promptStates = new Map(restoredState.promptStates || []);
 let replyTo;
+let editingMessageId;
 let workers = [];
 let workerHealth = new Map();
 let checkingWorkers = false;
@@ -182,7 +183,7 @@ function add(kind, text, id, messageAttachments = [], scroll = true, createdAt, 
   if (kind !== 'assistant' && kind !== 'user') element.textContent = text;
   if (kind === 'user') element.insertAdjacentHTML('beforeend', attachmentMarkup(messageAttachments));
   if (kind === 'user' && id) { const receipt = document.createElement('span'); receipt.className = 'message-receipt'; receipt.dataset.receiptId = id; element.querySelector('.user-message-meta')?.appendChild(receipt); renderReceipt(id); }
-  if (id && (kind === 'assistant' || kind === 'user')) { const actions = document.createElement('div'); actions.className = 'message-actions'; if (kind === 'assistant') { const copy = document.createElement('button'); copy.title = 'Copy Markdown'; copy.innerHTML = copySvg; copy.onclick = () => copyText(text); const reply = document.createElement('button'); reply.title = 'Reply to this response or selected text'; reply.innerHTML = replySvg; reply.onpointerdown = event => { reply._excerpt = selectedExcerpt(element); event.preventDefault(); }; reply.onclick = () => { replyTo = { id, quote: reply._excerpt || String(text).slice(0, 4000) }; renderReplyContext(); input.focus(); }; actions.append(copy, reply); } else { const edit = document.createElement('button'); edit.title = 'Edit and run this prompt again'; edit.innerHTML = pencilSvg; edit.onclick = () => { input.value = text; input.focus(); input.setSelectionRange(input.value.length, input.value.length); vscode.postMessage({ type: 'editMessage', id }); updateSubmit(); }; actions.append(edit); } const remove = document.createElement('button'); remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); actions.appendChild(remove); (kind === 'user' ? element.querySelector('.user-message-meta') : element)?.appendChild(actions); }
+  if (id && (kind === 'assistant' || kind === 'user')) { const actions = document.createElement('div'); actions.className = 'message-actions'; if (kind === 'assistant') { const copy = document.createElement('button'); copy.title = 'Copy Markdown'; copy.innerHTML = copySvg; copy.onclick = () => copyText(text); const reply = document.createElement('button'); reply.title = 'Reply to this response or selected text'; reply.innerHTML = replySvg; reply.onpointerdown = event => { reply._excerpt = selectedExcerpt(element); event.preventDefault(); }; reply.onclick = () => { replyTo = { id, quote: reply._excerpt || String(text).slice(0, 4000) }; renderReplyContext(); input.focus(); }; actions.append(copy, reply); } else { const edit = document.createElement('button'); edit.title = 'Edit this prompt; history changes only after sending'; edit.innerHTML = pencilSvg; edit.onclick = () => { editingMessageId = id; input.value = text; input.focus(); input.setSelectionRange(input.value.length, input.value.length); updateSubmit(); }; actions.append(edit); } const remove = document.createElement('button'); remove.title = 'Delete message'; remove.innerHTML = trashSvg; remove.onclick = () => vscode.postMessage({ type: 'deleteMessage', id }); actions.appendChild(remove); (kind === 'user' ? element.querySelector('.user-message-meta') : element)?.appendChild(actions); }
   if (shouldScroll) { element.scrollIntoView({ block: 'end' }); stickToBottom = true; persistScroll(); }
 }
 async function send() {
@@ -192,8 +193,8 @@ async function send() {
     await Promise.allSettled([...uploads.values()].map(upload => upload.done));
     const sentAttachments = queuedAttachments.splice(0);
     renderQueuedAttachments();
-    const id = crypto.randomUUID(); add('user', text, id, sentAttachments, true, new Date().toISOString(), replyTo); setPromptReceipt(id, 'sent'); input.value = '';
-    vscode.postMessage({ type: 'prompt', text, id, replyTo, mode: taskMode, attachments: sentAttachments.map(({ name, mime, path }) => ({ name, mime, path })) }); replyTo = undefined; renderReplyContext();
+    const id = crypto.randomUUID(); const editId = editingMessageId; add('user', text, id, sentAttachments, true, new Date().toISOString(), replyTo); setPromptReceipt(id, 'sent'); input.value = '';
+    vscode.postMessage({ type: 'prompt', text, id, editId, replyTo, mode: taskMode, attachments: sentAttachments.map(({ name, mime, path }) => ({ name, mime, path })) }); editingMessageId = undefined; replyTo = undefined; renderReplyContext();
   } finally { sending = false; }
 }
 const languageCodes = 'af am ar as az be bg bn bo br bs ca cs cy da de el en eo es et eu fa fi fil fo fr fy ga gd gl gu he hi hr hu hy id is it ja ka kk km kn ko ku ky la lb lo lt lv mg mi mk ml mn mr ms mt my ne nl no oc or pa pl ps pt qu ro ru sa sd si sk sl so sq sr sv sw ta te tg th tk tl tr tt ug uk ur uz vi wo xh yi yo zh zu'.split(' ');

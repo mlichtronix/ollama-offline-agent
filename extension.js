@@ -225,7 +225,12 @@ function rememberAssistant(text, id = messageId(), createdAt) { const event = ch
 function deleteChatMessage(id) {
   if (chatStore.remove(id)) postUi('messageDeleted', { id });
 }
-function editChatMessage(id) { if (chatStore.removeFrom(id).length) chatProvider?.replay(); }
+function replaceChatBranch(id) {
+  const message = chatStore.history.find(event => event.id === id);
+  if (!message || message.kind !== 'user') return false;
+  if (!chatStore.removeFrom(id).length) return false;
+  return true;
+}
 async function saveResource(resource) {
   const workspace = root();
   if (!workspace) throw new Error('Open a folder workspace before adding resources.');
@@ -800,13 +805,14 @@ function isTestCommand(call) {
   try { const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; return /\b(test|tests|pytest|jest|vitest|mocha|ctest|dotnet\s+test|cargo\s+test|go\s+test)\b/i.test(args.command || ''); } catch { return false; }
 }
 function testFailed(result) { return /^Exit\/error:/m.test(String(result)); }
-async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute') {
+async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
   if (!task) return;
   await ensureWorkspaceState();
+  const replacedBranch = !continuationMessages && editId ? replaceChatBranch(String(editId)) : false;
   const taskMode = ['ask', 'plan', 'execute'].includes(requestedMode) ? requestedMode : 'execute';
   activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], activity: [], workers: { active: 0, total: 0 }, files: [], checks: [], canRestore: false };
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
@@ -825,6 +831,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   // Resource paths are part of the model-only context. The persisted and
   // displayed user message intentionally contains only what the user wrote.
   const userEvent = rememberUser(taskWithResources, task, Boolean(initialTask), providedId, attachments, replyTo);
+  if (replacedBranch) chatProvider?.replay();
   const promptId = String(providedId || userEvent.id);
   const userMessage = { role: 'user', content: taskWithResources };
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
@@ -1046,7 +1053,7 @@ class OfflineChatViewProvider {
     view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri, ...(root() ? [vscode.Uri.file(root())] : [])], retainContextWhenHidden: true };
     view._ollamaMessageDisposable?.dispose();
     view._ollamaMessageDisposable = view.webview.onDidReceiveMessage(message => {
-      if (message.type === 'prompt' && String(message.text || '').trim()) ask(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, undefined, message.mode);
+      if (message.type === 'prompt' && String(message.text || '').trim()) ask(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, undefined, message.mode, message.editId);
       if (message.type === 'steer' && String(message.text || '').trim()) steer(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, message.mode);
       if (message.type === 'queue' && String(message.text || '').trim()) queueAgentRequest(String(message.text).trim(), message.id, Array.isArray(message.attachments) ? message.attachments : [], message.replyTo, message.mode);
       if (message.type === 'stop') requestStop();
@@ -1078,7 +1085,6 @@ class OfflineChatViewProvider {
       if (message.type === 'resource') saveResource(message).catch(error => postUi('resourceError', { clientId: message.clientId, message: error.message }));
       if (message.type === 'cancelResource') cancelResource(message.clientId);
       if (message.type === 'deleteMessage') deleteChatMessage(message.id);
-      if (message.type === 'editMessage') editChatMessage(message.id);
       if (message.type === 'ready') { this.readyViews.add(view); this.replay(view); }
     });
     view.webview.html = this.html(view.webview);
