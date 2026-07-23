@@ -352,7 +352,7 @@ async function autodetectWorkers() {
   const controller = createActiveAbortController(); workerDiscoveryController = controller; postUi('workerDiscovery', { working: true }); output.show(true); log('Worker autodetect started: scanning small active private IPv4 networks.');
   try {
     const hosts = await discoverOllamaHosts({}, controller.signal, log);
-    const existing = configuredWorkers(); const existingEndpoints = new Set(existing.map(worker => normalizeEndpoint(worker.endpoint))); const additions = [];
+    const existing = configuredWorkers(); const existingEndpoints = new Set(existing.map(worker => normalizeEndpoint(worker.endpoint))); const additions = []; const discoveredModels = new Map();
     for (const host of hosts) {
       if (controller.signal.aborted) throw Object.assign(new Error('Worker discovery stopped by user.'), { name: 'AbortError' });
       if (existing.length + additions.length >= 8) { log('Discovery found additional Ollama hosts, but the worker limit (8) has been reached.'); break; }
@@ -361,10 +361,11 @@ async function autodetectWorkers() {
         const models = await new OllamaClient({ getEndpoint: () => endpoint, getAuthorization: () => '' }).listModels(controller.signal);
         const model = models[0]?.name;
         if (!model) { log(`Discovery found Ollama on ${host.ip}, but it has no installed models; it was not added as a worker.`); continue; }
-        additions.push({ id: `worker-${messageId()}`, name: host.hostname || `Ollama ${host.ip}`, endpoint, model, enabled: true }); existingEndpoints.add(endpoint);
+        const id = `worker-${messageId()}`;
+        additions.push({ id, name: host.hostname || `Ollama ${host.ip}`, endpoint, model, enabled: true }); discoveredModels.set(id, models); existingEndpoints.add(endpoint);
       } catch (error) { if (controller.signal.aborted) throw Object.assign(new Error('Worker discovery stopped by user.'), { name: 'AbortError' }); log(`Discovery found ${host.ip}, but its models could not be read: ${error.message}.`); }
     }
-    if (additions.length) { await setWorkers([...existing, ...additions]); await checkWorkers(); vscode.window.showInformationMessage(`Autodetect added ${additions.length} Ollama worker${additions.length === 1 ? '' : 's'}.`); }
+    if (additions.length) { await setWorkers([...existing, ...additions]); for (const worker of additions) postUi('workerModels', { id: worker.id, models: discoveredModels.get(worker.id) || [] }); await checkWorkers(); vscode.window.showInformationMessage(`Autodetect added ${additions.length} Ollama worker${additions.length === 1 ? '' : 's'}.`); }
     else vscode.window.showInformationMessage(hosts.length ? 'Ollama was found, but no new worker with an installed model could be added.' : 'No local Ollama workers were found.');
   } catch (error) {
     if (error.name === 'AbortError') { log('Worker autodetect stopped by user.'); vscode.window.showInformationMessage('Worker autodetect stopped.'); }

@@ -361,5 +361,7 @@ test('worker autodetect is limited to small private IPv4 subnets', () => {
   }).map(item => item.address), ['192.168.1.10']);
   assert.match(source, /async function autodetectWorkers/);
   assert.match(source, /discoverOllamaHosts/);
+  assert.match(source, /const discoveredModels = new Map\(\)/);
+  assert.match(source, /postUi\('workerModels', \{ id: worker\.id, models: discoveredModels\.get\(worker\.id\)/);
   assert.match(workerDiscoverySource, /maxHostsPerSubnet: 254/);
 });
