@@ -12,6 +12,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
 const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
+const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
 test('Ollama client normalizes endpoints and sends scoped bearer authorization', async () => {
   assert.equal(normalizeEndpoint(' http://127.0.0.1:11434/// '), 'http://127.0.0.1:11434');
@@ -237,7 +238,15 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /name: 'web_download'/);
   assert.match(source, /name: 'read_downloaded_web_file'/);
   assert.match(source, /name: 'search_downloaded_web_file'/);
-  assert.match(source, /JavaScript-required SPA shell/);
+  assert.match(source, /JavaScript-required SPA page/);
+  assert.match(source, /name: 'list_browsers'/);
+  assert.match(source, /name: 'browser_open'/);
+  assert.match(source, /controlled browser tools/);
+  assert.match(workerPoolSource, /call list_browsers then browser_open/);
+  assert.match(browserSource, /function createFilteringProxy/);
+  assert.match(browserSource, /async function publicAddress/);
+  assert.match(browserSource, /--proxy-server=http:\/\/127\.0\.0\.1/);
+  assert.match(browserSource, /Private browser destination is blocked/);
   assert.match(source, /activeWebDownloads = new Map\(\)/);
   assert.match(source, /const body = await fetchPublicWeb\(target\); await rememberWebSource\(target, target\.hostname\)/);
   assert.doesNotMatch(source, /await rememberWebSource\(target, target\.hostname\); return truncate\(webText\(await fetchPublicWeb\(target\)\)/);

@@ -10,6 +10,7 @@ const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('./lib/olla
 const { ChatStore } = require('./lib/chat-store');
 const { WorkerPool, normalizeWorkers } = require('./lib/worker-pool');
 const { discoverOllamaHosts } = require('./lib/worker-discovery');
+const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
 
 let cancelled = false;
 let running = false;
@@ -466,8 +467,8 @@ function rememberWorkerReports(results) {
     result.reportId = chatStore.append('worker', text, { internal: true }).id;
   }
 }
-const workerRequirementNames = new Set(['chat_history', 'project_files', 'public_web', 'tool_calling', 'vision', 'context_8k', 'context_32k', 'context_64k', 'fast_inference']);
-function workerRuntimeCapabilities(worker) { const profile = worker.profile || {}; const modelCapabilities = new Set((profile.capabilities || []).map(value => String(value).toLowerCase())); const capabilities = new Set(['chat_history', 'project_files']); if (webEnabled()) capabilities.add('public_web'); if (modelCapabilities.has('tools')) capabilities.add('tool_calling'); if (modelCapabilities.has('vision')) capabilities.add('vision'); const context = Number(profile.contextLength || 0); if (context >= 8192) capabilities.add('context_8k'); if (context >= 32768) capabilities.add('context_32k'); if (context >= 65536) capabilities.add('context_64k'); if (Number(profile.benchmark?.tokensPerSecond || 0) >= 12) capabilities.add('fast_inference'); return capabilities; }
+const workerRequirementNames = new Set(['chat_history', 'project_files', 'public_web', 'browser', 'tool_calling', 'vision', 'context_8k', 'context_32k', 'context_64k', 'fast_inference']);
+function workerRuntimeCapabilities(worker) { const profile = worker.profile || {}; const modelCapabilities = new Set((profile.capabilities || []).map(value => String(value).toLowerCase())); const capabilities = new Set(['chat_history', 'project_files']); if (webEnabled()) { capabilities.add('public_web'); if (discoverBrowsers().some(browser => browser.headless)) capabilities.add('browser'); } if (modelCapabilities.has('tools')) capabilities.add('tool_calling'); if (modelCapabilities.has('vision')) capabilities.add('vision'); const context = Number(profile.contextLength || 0); if (context >= 8192) capabilities.add('context_8k'); if (context >= 32768) capabilities.add('context_32k'); if (context >= 65536) capabilities.add('context_64k'); if (Number(profile.benchmark?.tokensPerSecond || 0) >= 12) capabilities.add('fast_inference'); return capabilities; }
 function workerModelVariants(worker) {
   const configured = (worker.modelProfiles || []).find(item => item.name === worker.model);
   const variants = [{ name: worker.model, profile: worker.profile, size: Number(configured?.size || 0) }];
@@ -682,6 +683,19 @@ async function webDownload(url, requestedMaxBytes) {
     return `Downloaded ${name} as ${id} (${data.length} bytes, ${contentType}). ${text ? `Use read_downloaded_web_file with id "${id}" to inspect it.` : 'This is a binary asset; it is retained only as task-scoped evidence and cannot be executed or written by a worker.'}`;
   } finally { clearTimeout(timer); }
 }
+function browserInventory() {
+  const browsers = discoverBrowsers();
+  if (!browsers.length) return 'No supported browser executable was found. Install Microsoft Edge, Google Chrome, or Chromium to enable rendered-page analysis.';
+  return browsers.map(browser => `- ${browser.id}: ${browser.name} (${browser.engine}; ${browser.headless ? 'headless rendering available' : 'listed, but not supported for this renderer'})`).join('\n');
+}
+async function browserOpen(url, browserId, waitMs) {
+  if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.';
+  const target = safeWebUrl(url); const browsers = discoverBrowsers(); const requested = String(browserId || '').trim().toLowerCase(); const browser = (requested ? browsers.find(item => item.id === requested) : undefined) || browsers.find(item => item.headless);
+  if (!browser) return requested ? `No installed browser with id ${requested} can render headlessly. Call list_browsers first.` : 'No installed Chromium-based browser is available. Call list_browsers for detected browsers.';
+  const page = await renderPage(browser, target.toString(), waitMs); await rememberWebSource(target, target.hostname);
+  for (const observed of page.observedUrls.slice(0, 40)) await rememberWebSource(observed, new URL(observed).hostname);
+  return `Rendered with ${browser.name}. Observed ${page.observedUrls.length} public network destination(s).\n\n${truncate(webText(page.html), 50000) || '(The rendered page returned an empty DOM.)'}`;
+}
 function readDownloadedWebFile(id, startLine, endLine, pattern, flags, startOffset, endOffset) {
   const item = activeWebDownloads.get(String(id || ''));
   if (!item) return 'No downloaded web file with that id exists in this task.';
@@ -830,6 +844,8 @@ const tools = [
   { type: 'function', function: { name: 'share_file_excerpt', description: 'Publish an exact UTF-8 excerpt of a non-sensitive workspace text file directly in the user chat. Use when the user asks to see source or a file section, instead of repeating raw content in your response. Optional line bounds are inclusive; a maximum of 500 lines or 48 KB is enforced.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Workspace-relative path.' }, startLine: { type: 'number', minimum: 1, description: 'Optional first line, inclusive.' }, endLine: { type: 'number', minimum: 1, description: 'Optional last line, inclusive.' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'list_browsers', description: 'List installed browsers available to the agent and whether each can run the controlled headless renderer. Call this before browser_open when browser choice matters.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'browser_open', description: 'Render a public HTTP(S) page in an installed Chromium-based headless browser and return its JavaScript-rendered DOM. Uses a disposable profile and a filtering proxy that blocks private/LAN destinations and redirects. Call list_browsers first when choosing a browser. It does not write downloads to the workspace.', parameters: { type: 'object', properties: { url: { type: 'string' }, browserId: { type: 'string', description: 'Optional id returned by list_browsers; otherwise the first compatible installed browser is used.' }, waitMs: { type: 'number', minimum: 2000, maximum: 15000 } }, required: ['url'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
   { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace. Private and LAN addresses are blocked. Use it for raw HTML, source files, static bundles, or source maps; then inspect text with read_downloaded_web_file or search_downloaded_web_file.', parameters: { type: 'object', properties: { url: { type: 'string' }, maxBytes: { type: 'number', minimum: 1024, maximum: 4194304, description: 'Optional cap; defaults to 1 MiB and is capped at 4 MiB.' } }, required: ['url'] } } },
   { type: 'function', function: { name: 'read_downloaded_web_file', description: 'Read a UTF-8 textual file previously obtained with web_download. The file exists only for this task and is read-only. Optional line bounds and regex filtering work like read_file. For minified one-line assets, use startOffset/endOffset (character offsets, at most 24,000 characters per call).', parameters: { type: 'object', properties: { id: { type: 'string' }, startLine: { type: 'number', minimum: 1 }, endLine: { type: 'number', minimum: 1 }, pattern: { type: 'string', maxLength: 256 }, flags: { type: 'string' }, startOffset: { type: 'number', minimum: 0 }, endOffset: { type: 'number', minimum: 0 } }, required: ['id'] } } },
@@ -843,7 +859,7 @@ const tools = [
   { type: 'function', function: { name: 'git_log', description: 'Read recent Git commits. No changes are made.', parameters: { type: 'object', properties: { count: { type: 'number', minimum: 1, maximum: 50 } } } } },
   { type: 'function', function: { name: 'save_skill', description: 'Save a reusable local playbook as Markdown guidance for future tasks. This does not add tools or system permissions. Requires user approval.', parameters: { type: 'object', properties: { name: { type: 'string' }, instructions: { type: 'string' } }, required: ['name', 'instructions'] } } }
 ];
-const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']);
+const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'list_browsers', 'browser_open', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']);
 const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name));
 
 async function filesRecursive(dir, base, result) {
@@ -880,6 +896,8 @@ async function executeTool(call) {
       return truncate(hits.join('\n') || '(no matches)');
     }
     if (call.function.name === 'web_search') return await webSearch(args.query, args.maxResults);
+    if (call.function.name === 'list_browsers') return browserInventory();
+    if (call.function.name === 'browser_open') return await browserOpen(args.url, args.browserId, args.waitMs);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
     if (call.function.name === 'web_download') return await webDownload(args.url, args.maxBytes);
     if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags, args.startOffset, args.endOffset);
@@ -1148,7 +1166,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
   const priorRequestContext = lastUser ? `\n\nCandidate previous user request (use it only when it clarifies the newest task; otherwise ignore it):\n${truncate(lastUser.content, 4000)}` : '';
   const webAuthorization = webEnabled()
-    ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search, web_fetch, and web_download for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. If web_fetch returns a JavaScript-required SPA shell, that is not a blocker: use web_download on the page to inspect raw HTML, download referenced public static JS/source-map assets, and use search_downloaded_web_file or offset reads for minified files. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If retrieval fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
+    ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search, web_fetch, web_download, and the controlled browser tools for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. For JavaScript-required SPA pages, first call list_browsers, then browser_open with a compatible installed Chromium browser to obtain the rendered DOM and observed public sources. If browser rendering is unavailable or insufficient, use web_download on the page to inspect raw HTML, download referenced public static JS/source-map assets, and use search_downloaded_web_file or offset reads for minified files. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If retrieval fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
     : '\n\nPublic web access is OFF. Do not claim to have fetched public sources. If the task requires an external source, report that the Globe setting must be enabled or use supplied local material.';
   const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
