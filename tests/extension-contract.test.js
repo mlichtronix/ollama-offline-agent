@@ -142,6 +142,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function detectExecutionEnvironment/);
   assert.match(source, /executionEnvironment = detectExecutionEnvironment\(\)/);
   assert.match(source, /cp\.execFile\(runner\.executable/);
+  assert.match(source, /command working directory does not exist or is inaccessible/);
+  assert.match(source, /command cwd is not a directory/);
+  assert.match(source, /cached runner can become stale/);
+  assert.match(source, /Before write_file, base the complete replacement only on the actual, complete content returned by read_file/);
   assert.match(source, /'-NoProfile', '-NonInteractive'/);
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
