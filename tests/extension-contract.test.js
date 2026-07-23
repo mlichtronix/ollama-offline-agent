@@ -6,10 +6,12 @@ const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
+const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
 const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
+const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 
 test('Ollama client normalizes endpoints and sends scoped bearer authorization', async () => {
   assert.equal(normalizeEndpoint(' http://127.0.0.1:11434/// '), 'http://127.0.0.1:11434');
@@ -337,4 +339,27 @@ test('release workflow publishes a stable latest-download VSIX asset', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /ollama-offline-agent\.vsix/);
+});
+
+test('worker autodetect is limited to small private IPv4 subnets', () => {
+  assert.equal(ipv4ToUint32('192.168.1.1'), 3232235777);
+  assert.equal(uint32ToIpv4(3232235777), '192.168.1.1');
+  assert.equal(netmaskToPrefixLength('255.255.255.0'), 24);
+  assert.throws(() => netmaskToPrefixLength('255.0.255.0'), /Non-contiguous/);
+  assert.equal(isPrivateIpv4('192.168.1.5'), true);
+  assert.equal(isPrivateIpv4('172.16.1.5'), true);
+  assert.equal(isPrivateIpv4('172.32.1.5'), false);
+  assert.equal(isPrivateIpv4('127.0.0.1'), false);
+  const hosts = subnetHosts('192.168.1.10', 24, 254);
+  assert.equal(hosts.length, 253);
+  assert.equal(hosts.includes('192.168.1.10'), false);
+  assert.throws(() => subnetHosts('10.0.0.10', 16, 254), /safe discovery limit/);
+  assert.deepEqual(localIpv4Interfaces({
+    ethernet: [{ family: 'IPv4', internal: false, address: '192.168.1.10', netmask: '255.255.255.0' }],
+    loopback: [{ family: 'IPv4', internal: true, address: '127.0.0.1', netmask: '255.0.0.0' }],
+    public: [{ family: 'IPv4', internal: false, address: '203.0.113.5', netmask: '255.255.255.0' }]
+  }).map(item => item.address), ['192.168.1.10']);
+  assert.match(source, /async function autodetectWorkers/);
+  assert.match(source, /discoverOllamaHosts/);
+  assert.match(workerDiscoverySource, /maxHostsPerSubnet: 254/);
 });
