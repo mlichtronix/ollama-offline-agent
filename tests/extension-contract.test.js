@@ -242,6 +242,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /name: 'list_browsers'/);
   assert.match(source, /name: 'browser_open'/);
   assert.match(source, /controlled browser tools/);
+  assert.match(source, /Prefer Chrome when it is installed/);
+  assert.match(source, /no installed headless browser produced a usable DOM/);
+  assert.match(source, /produced no usable DOM, so the host retried/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
   assert.match(browserSource, /function createFilteringProxy/);
   assert.match(browserSource, /async function publicAddress/);
