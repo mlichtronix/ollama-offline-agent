@@ -435,26 +435,68 @@ async function autodetectWorkers() {
   } finally { releaseActiveAbortController(controller); if (workerDiscoveryController === controller) workerDiscoveryController = undefined; postUi('workerDiscovery', { working: false }); }
 }
 function workerFindingsContext(results) {
-  const completed = results.filter(item => item.text);
+  const completed = results.filter(workerResultUsable);
   if (!completed.length) return '';
   return `\n\nDelegated expert findings. Treat them as leads, not automatically as evidence. Validate relevant local files before acting. For every external factual claim, check that the cited source is authoritative for that exact subject: specifications/standards bodies for protocol behavior, official project docs or registry metadata for package facts, and official publishers/registers for legal or service facts. A vendor blog supports its own claims but not universal protocol semantics. For time-sensitive facts (versions, dates, prices, laws, availability, current service status), state them as facts only when a worker report includes an exact, authoritative URL that supports the exact claim, or when you independently fetch such a source. A search-result snippet, model memory, or a secondary summary is not verification; otherwise qualify the claim as unverified or omit it. Present REST/GraphQL-style tradeoffs as conditional analysis with assumptions, never as absolute rules. Use read_chat_messages with a report ID only when you need details omitted below:\n${completed.map(item => `\n[${item.worker.name} — ${item.role || 'specialist'} — report ${item.reportId}; assigned: ${item.task}]\n${truncate(item.text, 8000)}`).join('\n')}`;
 }
 function workerDispatchContext(results) {
-  const failed = results.filter(item => item.error);
+  const failed = results.filter(item => !workerResultUsable(item));
   if (!failed.length) return '';
   return '\n\nWorker dispatch failures: ' + failed.map(item => item.worker.name + ' (' + (item.role || 'specialist') + '): ' + item.error).join('; ') + '. These assignments did not produce reports; do not describe them as missing, completed, or evidence.';
 }
 function rememberWorkerReports(results) {
   for (const result of results) {
-    if (!result.text) continue;
+    if (!workerResultUsable(result)) continue;
     const text = `# Expert worker report\n\nWorker: ${result.worker.name}\nRole: ${result.role || 'specialist'}\nAssignment: ${result.task || ''}\n\n${truncate(result.text, 32000)}`;
     result.reportId = chatStore.append('worker', text, { internal: true }).id;
   }
 }
 const workerRequirementNames = new Set(['chat_history', 'project_files', 'public_web', 'tool_calling', 'vision', 'context_8k', 'context_32k', 'context_64k', 'fast_inference']);
 function workerRuntimeCapabilities(worker) { const profile = worker.profile || {}; const modelCapabilities = new Set((profile.capabilities || []).map(value => String(value).toLowerCase())); const capabilities = new Set(['chat_history', 'project_files']); if (webEnabled()) capabilities.add('public_web'); if (modelCapabilities.has('tools')) capabilities.add('tool_calling'); if (modelCapabilities.has('vision')) capabilities.add('vision'); const context = Number(profile.contextLength || 0); if (context >= 8192) capabilities.add('context_8k'); if (context >= 32768) capabilities.add('context_32k'); if (context >= 65536) capabilities.add('context_64k'); if (Number(profile.benchmark?.tokensPerSecond || 0) >= 12) capabilities.add('fast_inference'); return capabilities; }
-function workerCapabilityDescription(worker) { const profile = worker.profile || {}; const capabilities = [...workerRuntimeCapabilities(worker)].join(', ') || 'none'; const speed = profile.benchmark?.tokensPerSecond ? `${profile.benchmark.tokensPerSecond} tok/s` : 'unmeasured'; return `${capabilities}; context: ${profile.contextLength || 'unknown'} tokens; speed: ${speed}; model: ${profile.parameterSize || 'unknown'} ${profile.quantization || ''}`.trim(); }
+function workerModelVariants(worker) {
+  const configured = (worker.modelProfiles || []).find(item => item.name === worker.model);
+  const variants = [{ name: worker.model, profile: worker.profile, size: Number(configured?.size || 0) }];
+  for (const item of worker.modelProfiles || []) if (item.profile && !variants.some(variant => variant.name === item.name)) variants.push({ name: item.name, profile: item.profile, size: Number(item.size || 0) });
+  return variants.map(variant => ({ ...worker, model: variant.name, profile: variant.profile, modelSize: variant.size }));
+}
+function workerModelScore(worker, requirements = []) {
+  const profile = worker.profile || {}; const capabilities = workerRuntimeCapabilities(worker); const context = Number(profile.contextLength || 0); const speed = Number(profile.benchmark?.tokensPerSecond || 0);
+  return requirements.length * 1000 + capabilities.size * 100 + Math.min(context / 1024, 999) + Math.min(speed, 99);
+}
+function preferredWorkerModel(worker, requirements = []) {
+  const variants = workerModelVariants(worker); const configured = variants.find(variant => variant.model === worker.model);
+  // The configured model is an explicit user choice. Keep it whenever it can
+  // perform the assignment; probing a larger alternative can be slow or OOM.
+  if (configured && workerSupportsRequirements(configured, requirements)) return configured;
+  const configuredSize = Number(configured?.modelSize || 0);
+  // A fallback model is allowed only when its profile is known and its stored
+  // size is no greater than the user's configured model. This is deliberately
+  // conservative: never auto-load an unknown, larger, or cloud-sized model.
+  return variants.filter(variant => workerSupportsRequirements(variant, requirements)).filter(variant => configuredSize > 0 && variant.modelSize > 0 && variant.modelSize <= configuredSize).sort((left, right) => workerModelScore(right, requirements) - workerModelScore(left, requirements) || left.model.localeCompare(right.model))[0];
+}
+function workerCapabilityDescription(worker) { const selected = preferredWorkerModel(worker, []) || worker; const profile = selected.profile || {}; const capabilities = [...workerRuntimeCapabilities(selected)].join(', ') || 'none'; const speed = profile.benchmark?.tokensPerSecond ? `${profile.benchmark.tokensPerSecond} tok/s` : 'unmeasured'; const alternateModels = workerModelVariants(worker).map(variant => variant.model).join(', '); return `${capabilities}; context: ${profile.contextLength || 'unknown'} tokens; speed: ${speed}; selected model: ${selected.model}; installed model profiles: ${alternateModels || 'unknown'}`.trim(); }
 function workerSupportsRequirements(worker, requirements) { const capabilities = workerRuntimeCapabilities(worker); return requirements.every(requirement => capabilities.has(requirement)); }
+function readOnlyWorkerViolation(task) {
+  const text = String(task || '');
+  const patterns = [
+    /\b(?:run|execute|launch|invoke)\b[\s\S]{0,48}\b(?:command|shell|terminal|bandit|ruff|pytest|tests?|lint|build|compile|pip|npm|git)\b/i,
+    /\b(?:install|uninstall|write|create|modify|edit|delete|rename|move)\b[\s\S]{0,48}\b(?:files?|code|scripts?|scanner|skills?|playbook|packages?|dependenc)/i,
+    /\b(?:git\s+(?:commit|push|pull|checkout|merge)|npm\s+(?:install|test|run)|pip\s+install)\b/i
+  ];
+  return patterns.find(pattern => pattern.test(text))?.source;
+}
+function workerSupportsAssignment(worker, assignment) { return Boolean(worker) && Boolean(preferredWorkerModel(worker, assignment.requires || [])) && !readOnlyWorkerViolation(assignment.task); }
+function workerRuntimeForAssignment(worker, assignment) {
+  if (!worker || worker.status !== 'available' || readOnlyWorkerViolation(assignment.task)) return undefined;
+  return preferredWorkerModel(worker, assignment.requires || []);
+}
+function assignmentResult(results, workerId) {
+  return results.find(result => (result.retryOf || result.worker.id) === workerId && workerResultUsable(result)) || results.find(result => (result.retryOf || result.worker.id) === workerId);
+}
+function workerResultUsable(result) {
+  if (!result?.text || result.error || result.quality?.accepted === false) return false;
+  return !/\b(?:i\s+(?:cannot|can't|am unable to)|unable to (?:complete|perform)|no (?:shell|write|command|tool) capability|cannot complete)\b/i.test(String(result.text));
+}
 function fallbackWorkerPlan(workers, maxTasks) {
   const specialities = [
     ['primary task analyst', 'Address the user-requested criteria directly. Inspect only relevant workspace context, then synthesize risks, compatibility, implementation, and validation considerations. Do not substitute a generic workspace inventory for the requested analysis.', ['chat_history', 'project_files', 'tool_calling']],
@@ -462,7 +504,7 @@ function fallbackWorkerPlan(workers, maxTasks) {
     ['security reviewer', 'Review relevant implementation and configuration paths for security, privacy, reliability, and compatibility risks. Report only evidence-backed findings.', ['project_files', 'tool_calling']],
     ['domain researcher', 'Search relevant chat history and authoritative public sources for requirements, constraints, APIs, or domain facts needed for this task.', ['chat_history', 'public_web', 'tool_calling']]
   ];
-  const assignments = workers.slice(0, maxTasks).map((worker, index) => ({ workerId: worker.id, role: specialities[index % specialities.length][0], task: specialities[index % specialities.length][1], requires: specialities[index % specialities.length][2], dependsOn: [] })).filter(item => workerSupportsRequirements(workers.find(worker => worker.id === item.workerId), item.requires));
+  const assignments = workers.slice(0, maxTasks).map((worker, index) => ({ workerId: worker.id, role: specialities[index % specialities.length][0], task: specialities[index % specialities.length][1], requires: specialities[index % specialities.length][2], dependsOn: [] })).filter(item => workerSupportsAssignment(workers.find(worker => worker.id === item.workerId), item));
   return { masterFocus: 'Own implementation, integration, and validation. Use delegated evidence to avoid repeating independent research.', assignments, delegationReason: assignments.length ? 'Fallback plan for a complex task.' : 'No worker has the tool and runtime capabilities required for a safe fallback assignment.' };
 }
 function hasDependencyCycle(assignments) {
@@ -485,7 +527,7 @@ function parseDelegationPlan(content, workers, maxTasks) {
     const value = JSON.parse(candidate); const allowed = new Set(workers.map(worker => worker.id)); const used = new Set();
     const delegationReason = truncate(String(value.delegationReason || '').trim(), 500);
     if (value.delegate === false) return { masterFocus: truncate(String(value.masterFocus || 'Answer directly without worker delegation.').trim(), 1200), assignments: [], delegationReason: delegationReason || 'The task is small or does not benefit from independent research.' };
-    const assignments = (Array.isArray(value.assignments) ? value.assignments : []).map(item => ({ workerId: String(item.workerId || ''), role: String(item.role || 'specialist').trim(), task: String(item.task || '').trim(), requires: Array.isArray(item.requires) ? item.requires.map(capability => String(capability || '').trim()).filter(Boolean) : [], dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(id => String(id)).filter(id => allowed.has(id) && id !== String(item.workerId || '')) : [] })).filter(item => allowed.has(item.workerId) && !used.has(item.workerId) && item.task && item.requires.length && item.requires.every(capability => workerRequirementNames.has(capability)) && workerSupportsRequirements(workers.find(worker => worker.id === item.workerId), item.requires)).filter(item => (used.add(item.workerId), true)).slice(0, maxTasks);
+    const assignments = (Array.isArray(value.assignments) ? value.assignments : []).map(item => ({ workerId: String(item.workerId || ''), role: String(item.role || 'specialist').trim(), task: String(item.task || '').trim(), requires: Array.isArray(item.requires) ? item.requires.map(capability => String(capability || '').trim()).filter(Boolean) : [], dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(id => String(id)).filter(id => allowed.has(id) && id !== String(item.workerId || '')) : [] })).filter(item => allowed.has(item.workerId) && !used.has(item.workerId) && item.task && item.requires.length && item.requires.every(capability => workerRequirementNames.has(capability)) && workerSupportsAssignment(workers.find(worker => worker.id === item.workerId), item)).filter(item => (used.add(item.workerId), true)).slice(0, maxTasks);
     if (!assignments.length || hasDependencyCycle(assignments)) return undefined;
     return { masterFocus: truncate(String(value.masterFocus || 'Implement, integrate, and validate the requested change.').trim(), 1200), assignments, delegationReason: delegationReason || 'Independent expert research is useful for this task.' };
   } catch { return undefined; }
@@ -493,29 +535,83 @@ function parseDelegationPlan(content, workers, maxTasks) {
 async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
   const pending = new Map(plan.assignments.map(item => [item.workerId, item]));
   const results = [];
+  const retryAttempts = new Set();
+  const compatibleRetryWorkers = (assignment, excluded = new Set()) => health
+    .filter(worker => !excluded.has(worker.id))
+    .map(worker => workerRuntimeForAssignment(worker, assignment))
+    .filter(Boolean)
+    .sort((left, right) => workerSpeed(right) - workerSpeed(left) || left.name.localeCompare(right.name));
+  const runtimeHealth = (assignments) => {
+    const assignmentByWorker = new Map(assignments.map(assignment => [assignment.workerId, assignment]));
+    return health.map(worker => {
+      const assignment = assignmentByWorker.get(worker.id);
+      return assignment ? (workerRuntimeForAssignment(worker, assignment) || { ...worker, status: 'unavailable', error: 'No safe compatible installed model for this assignment.' }) : worker;
+    });
+  };
+  const retryAssignment = async (assignment, failedResult) => {
+    const attempted = new Set([assignment.workerId]);
+    for (const worker of compatibleRetryWorkers(assignment, attempted)) {
+      const key = `${assignment.workerId}\n${worker.id}`; if (retryAttempts.has(key)) continue;
+      retryAttempts.add(key); attempted.add(worker.id);
+      log(`Retrying ${assignment.role} on compatible worker ${worker.name} (${worker.model}) after ${failedResult.worker.name} did not produce a usable report.`);
+      updateTaskUi('research', 'active', `Retrying ${assignment.role} on ${worker.name}.`);
+      updateTaskWorkers(1, plan.assignments.length);
+      let retry;
+      const retryAssignment = { ...assignment, workerId: worker.id };
+      try { retry = await workerPool.delegate(task, { health: runtimeHealth([retryAssignment]), assignments: [retryAssignment], initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
+      finally { updateTaskWorkers(0, plan.assignments.length); }
+      const result = retry.results[0];
+      if (!result) continue;
+      result.retryOf = assignment.workerId; results.push(result);
+      if (workerResultUsable(result)) return result;
+    }
+    return undefined;
+  };
   while (pending.size) {
-    const ready = [...pending.values()].filter(item => (item.dependsOn || []).every(id => results.some(result => result.worker.id === id)));
+    const ready = [...pending.values()].filter(item => (item.dependsOn || []).every(id => workerResultUsable(assignmentResult(results, id))));
     if (!ready.length) throw new Error('Worker dependency plan contains an unresolved cycle.');
     const assignments = ready.map(item => {
-      const dependencies = (item.dependsOn || []).map(id => results.find(result => result.worker.id === id)).filter(Boolean);
+      const dependencies = (item.dependsOn || []).map(id => assignmentResult(results, id)).filter(workerResultUsable);
       let remaining = 12000;
       const context = dependencies.length ? '\n\nCompleted dependency reports are available for this subtask. Reuse only relevant findings and validate them:\n' + dependencies.map(result => { const excerpt = truncate(result.text, Math.min(8000, remaining)); remaining -= excerpt.length; return '[' + result.worker.name + ' — ' + result.role + ']\n' + excerpt; }).join('\n\n') : '';
       return { ...item, task: item.task + context };
     });
     throwIfCancelled();
+    const selectedHealth = runtimeHealth(assignments);
+    for (const assignment of assignments) {
+      const configured = health.find(worker => worker.id === assignment.workerId);
+      const selected = selectedHealth.find(worker => worker.id === assignment.workerId);
+      if (configured && selected?.status === 'available' && selected.model !== configured.model) log(`Selected safe compatible model ${selected.model} instead of ${configured.model} for ${assignment.role}.`);
+      if (selected?.status !== 'available') throw new Error(`No safe compatible model is available on worker ${configured?.name || assignment.workerId} for ${assignment.role}. Add or enable a suitable worker, then retry.`);
+    }
     updateTaskWorkers(assignments.length, plan.assignments.length);
     let dispatch;
-    try { dispatch = await workerPool.delegate(task, { health, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
+    try { dispatch = await workerPool.delegate(task, { health: selectedHealth, assignments, initialMessages: lastAssistant ? [lastAssistant] : [], tools: workerTools, extractCalls, executeTool: executeWorkerTool, signal }); }
     finally { updateTaskWorkers(0, plan.assignments.length); }
     results.push(...dispatch.results);
     for (const item of ready) pending.delete(item.workerId);
+    // Wait for the whole concurrent batch to settle before retrying. This keeps a
+    // capable worker from being double-booked and never downgrades work to an
+    // incompatible worker merely to keep the pipeline moving.
+    for (const assignment of ready) {
+      const result = dispatch.results.find(item => item.worker.id === assignment.workerId);
+      if (workerResultUsable(result)) continue;
+      // Preserve completed dependency findings when a dependent assignment is
+      // retried on another worker.
+      const dispatchedAssignment = assignments.find(item => item.workerId === assignment.workerId) || assignment;
+      const replacement = await retryAssignment(dispatchedAssignment, result || { worker: { name: 'the assigned worker' } });
+      if (!workerResultUsable(replacement)) {
+        const requirements = (assignment.requires || []).join(', ') || 'read-only project analysis';
+        throw new Error(`No compatible worker could complete the ${assignment.role} assignment after ${result?.worker?.name || 'the assigned worker'} failed or declined. Required capabilities: ${requirements}. Add or enable a suitable worker, then retry.`);
+      }
+    }
   }
   return { health, results };
 }
 async function planWorkerAssignments(task, workers, lastAssistant, lastUser, maxTasks, masterSession) {
   const fallback = fallbackWorkerPlan(workers, maxTasks);
   const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}; runtime profile: ${workerCapabilityDescription(worker)}`).join('\n');
-  const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Never assign image analysis without vision, tool-dependent research without tool_calling, large source/context analysis without an adequate context requirement, or latency-sensitive/long-running work without fast_inference. Write masterFocus, role, task, and requires in English so every worker receives an English assignment while preserving all user constraints. requires must contain every capability needed, selected only from: ${[...workerRequirementNames].join(', ')}. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"...","requires":["project_files","tool_calling"]}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
+  const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, installs tools, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. A worker task must be analytical and read-only: never ask it to run or invoke bandit, ruff, pytest, tests, a shell, a terminal, Git, npm, pip, build tools, installers, or to create/edit/delete files, scanners, skills, or playbooks. Ask it to inspect evidence and report what the master should run or change. Never assign image analysis without vision, tool-dependent research without tool_calling, large source/context analysis without an adequate context requirement, or latency-sensitive/long-running work without fast_inference. Write masterFocus, role, task, and requires in English so every worker receives an English assignment while preserving all user constraints. requires must contain every capability needed, selected only from: ${[...workerRequirementNames].join(', ')}. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"...","requires":["project_files","tool_calling"]}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
   const plannerGraph = ' First decide whether delegation is worthwhile. For a direct, narrow, or low-risk task return delegate:false, a short delegationReason, and no assignments. Otherwise return delegate:true, a short delegationReason, and no more than ' + maxTasks + ' assignments. An explicit user maximum is an upper bound, not a requirement to use that many workers. When there are fewer workers than explicitly requested expert topics, consolidate those requested topics into the available worker assignments instead of substituting generic roles. Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
   try {
     const priorRequest = lastUser ? `\n\nCandidate previous user request: ${truncate(lastUser.content, 4000)}\nUse it only if it clarifies the newest task.` : '';
@@ -917,6 +1013,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
+  let emptyResponseNudges = 0;
   let promptRead = false;
   try {
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
@@ -939,6 +1036,19 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       messages.push(message);
       const calls = extractCalls(message);
       if (!calls.length) {
+        const streamedResponse = activeStreams.get(streamId)?.text; const response = String(streamedResponse || message.content || '').trim();
+        if (!response) {
+          activeStreams.delete(streamId);
+          postUi('assistantClear', { id: streamId });
+          if (emptyResponseNudges < 1) {
+            emptyResponseNudges++;
+            messages.push({ role: 'user', content: 'You returned no final answer and made no tool call. Continue the active task now: either call the next necessary tool or provide a concise final answer with the actions actually completed and any blocker.' });
+            log('Empty-response recovery guard: asking the agent to continue (1/1).');
+            updateTaskUi('continue', 'active', 'Model returned no answer; requesting a concrete continuation.');
+            continue;
+          }
+          throw new Error('Model returned no final answer after an automatic recovery attempt. Select a more capable model or retry the task.');
+        }
         if (failingTest && recoveryNudges < 2) {
           recoveryNudges++;
           activeStreams.delete(streamId);
@@ -947,7 +1057,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const streamedResponse = activeStreams.get(streamId)?.text; const response = streamedResponse || message.content || '(no response)'; const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
+        const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });

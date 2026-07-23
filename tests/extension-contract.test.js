@@ -168,6 +168,14 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Write masterFocus, role, task, and requires in English/);
   assert.match(source, /workerRuntimeCapabilities/);
   assert.match(source, /workerSupportsRequirements/);
+  assert.match(source, /function preferredWorkerModel/);
+  assert.match(source, /function workerRuntimeForAssignment/);
+  assert.match(source, /function readOnlyWorkerViolation/);
+  assert.match(source, /function workerResultUsable/);
+  assert.match(source, /Retrying \$\{assignment\.role\} on compatible worker/);
+  assert.match(source, /No compatible worker could complete/);
+  assert.match(source, /No safe compatible installed model for this assignment/);
+  assert.match(source, /Empty-response recovery guard/);
   assert.match(source, /const workerBenchmarks = new Map\(\)/);
   assert.match(source, /cached\?\.key === key/);
   assert.match(source, /const needsBenchmark = configuredWorkers\(\)\.some/);
@@ -175,6 +183,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(ollamaClientSource, /async modelProfile\(model, signal\)/);
   assert.match(ollamaClientSource, /async benchmark\(model, signal\)/);
   assert.match(workerPoolSource, /async health\(\{ benchmark = false, signal \} = \{\}\)/);
+  assert.match(workerPoolSource, /modelProfiles/);
   assert.match(source, /const activeAbortControllers = new Set\(\)/);
   assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
   assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);
