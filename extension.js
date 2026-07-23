@@ -265,13 +265,24 @@ function commandExists(command) {
     : cp.spawnSync(probeShell, ['-lc', `command -v -- ${command}`], { stdio: 'ignore' });
   return !probe.error && probe.status === 0;
 }
+function resolveWindowsCommandShell() {
+  if (process.platform !== 'win32') return undefined;
+  for (const command of ['pwsh.exe', 'powershell.exe']) {
+    const probe = cp.spawnSync('where.exe', [command], { windowsHide: true, encoding: 'utf8' });
+    const candidate = String(probe.stdout || '').split(/\r?\n/).map(value => value.trim()).find(value => value && fs.existsSync(value));
+    if (candidate) return { executable: candidate, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'], label: path.basename(candidate) };
+  }
+  const commandPrompt = String(process.env.ComSpec || '').trim();
+  if (commandPrompt && fs.existsSync(commandPrompt)) return { executable: commandPrompt, args: ['/d', '/s', '/c'], label: path.basename(commandPrompt) };
+  return undefined;
+}
 function describeExecutionEnvironment() {
   if (environmentDescription) return environmentDescription;
   const platformNames = { win32: 'Windows', darwin: 'macOS', linux: 'Linux', android: 'Android' };
   const platform = platformNames[process.platform] || process.platform;
   const profileKey = process.platform === 'win32' ? 'defaultProfile.windows' : process.platform === 'darwin' ? 'defaultProfile.osx' : 'defaultProfile.linux';
   const vscodeProfile = vscode.workspace.getConfiguration('terminal.integrated').get(profileKey) || 'not configured';
-  const commandShell = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : (process.env.SHELL || '/bin/sh');
+  const commandShell = process.platform === 'win32' ? (resolveWindowsCommandShell()?.label || 'no usable Windows shell') : (process.env.SHELL || '/bin/sh');
   const installed = ['git', 'node', 'python', 'python3', 'pwsh', 'powershell', 'bash', 'zsh', 'sh', 'cmd'].filter(commandExists);
   const remote = vscode.env.remoteName ? `VS Code remote host: ${vscode.env.remoteName}` : 'VS Code local host';
   environmentDescription = `Execution environment (authoritative, do not probe shell syntax first): ${remote}; extension host OS: ${platform} (${process.platform}, ${process.arch}, ${process.release.name || 'Node'} ${process.version}); run_command executes through ${commandShell}; configured VS Code integrated-terminal profile: ${vscodeProfile}. Detected command-line programs: ${installed.join(', ') || 'none detected'}. Use commands and path syntax for this extension-host OS. The visible VS Code client may be on another device; it is not the command execution environment.`;
@@ -710,12 +721,18 @@ function runCommand(command, requestedCwd) {
   const timeout = configuredTimeout > 0 ? configuredTimeout * 1000 : 0;
   let cwd;
   try { cwd = requestedCwd ? resolveTarget(requestedCwd) : root(); } catch (error) { return Promise.resolve(`Tool error: ${error.message}`); }
+  const windowsShell = resolveWindowsCommandShell();
+  if (process.platform === 'win32' && !windowsShell) return Promise.resolve('Tool error: no usable PowerShell or Command Prompt executable was found.');
   return new Promise(resolve => {
-    const child = cp.exec(command, { cwd, windowsHide: true, timeout, maxBuffer: 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+    const callback = (error, stdout, stderr) => {
       if (activeChild === child) activeChild = undefined;
       const status = error ? `Exit/error: ${error.message}` : 'Exit: 0';
       resolve(truncate(`${status}\nSTDOUT:\n${stdout || ''}\nSTDERR:\n${stderr || ''}`));
-    });
+    };
+    const options = { cwd, windowsHide: true, timeout, maxBuffer: 1024 * 1024, encoding: 'utf8' };
+    const child = process.platform === 'win32'
+      ? cp.execFile(windowsShell.executable, [...windowsShell.args, String(command)], options, callback)
+      : cp.exec(command, options, callback);
     activeChild = child;
     if (cancelled) stopProcessTree(child);
   });
