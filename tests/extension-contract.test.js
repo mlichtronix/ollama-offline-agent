@@ -91,6 +91,22 @@ test('chat store persists UTF-8 history and matching conversation context', asyn
   }
 });
 
+test('shared file excerpts persist as display-only chat events', async () => {
+  const workspace = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ollama-agent-excerpt-'));
+  let nextId = 0;
+  try {
+    const store = new ChatStore({ getWorkspace: () => workspace, createId: () => `excerpt-${++nextId}` });
+    await store.ensureWorkspace();
+    store.append('fileExcerpt', '# Heading\n\n```python\nprint(1)\n```', { fileExcerpt: { path: 'docs/example.md', startLine: 1, endLine: 5, totalLines: 8, language: 'markdown' } });
+    await store.save();
+    const restored = new ChatStore({ getWorkspace: () => workspace, createId: () => `restored-${++nextId}` });
+    await restored.ensureWorkspace();
+    assert.equal(restored.history[0].kind, 'fileExcerpt');
+    assert.deepEqual(restored.history[0].fileExcerpt, { path: 'docs/example.md', startLine: 1, endLine: 5, totalLines: 8, language: 'markdown' });
+    assert.equal(restored.conversation.length, 0);
+  } finally { await fs.promises.rm(workspace, { recursive: true, force: true }); }
+});
+
 test('security controls remain present', () => {
   assert.match(source, /realpathSync\.native/);
   assert.match(source, /isSensitiveTarget/);
@@ -249,6 +265,10 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /recordTaskCheck/);
   assert.match(source, /function diffLineStats/);
   assert.match(source, /function readFileContent/);
+  assert.match(source, /function shareFileExcerpt/);
+  assert.match(source, /name: 'share_file_excerpt'/);
+  assert.match(source, /function openSharedFileExcerpt/);
+  assert.match(source, /Shared \$\{relative\}, lines/);
   assert.match(source, /startLine/);
   assert.match(source, /pattern: \{ type: 'string'/);
   assert.match(source, /Regex filter rejected/);
@@ -314,6 +334,9 @@ test('chat rendering preserves inline-code table pipes and exposes copy/reply ac
   const chatSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.js'), 'utf8');
   const chatStyles = fs.readFileSync(path.join(__dirname, '..', 'media', 'chat.css'), 'utf8');
   assert.match(chatSource, /function tableCells/);
+  assert.match(chatSource, /function renderFileExcerpt/);
+  assert.match(chatSource, /file-excerpt-markdown/);
+  assert.match(chatSource, /data-open-file-excerpt/);
   assert.match(chatSource, /data-copy-table/);
   assert.match(chatSource, /copySvg/);
   assert.match(chatSource, /pencilSvg/);
