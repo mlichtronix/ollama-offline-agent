@@ -236,6 +236,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function workerFailureReason/);
   assert.match(source, /name: 'web_download'/);
   assert.match(source, /name: 'read_downloaded_web_file'/);
+  assert.match(source, /name: 'search_downloaded_web_file'/);
+  assert.match(source, /JavaScript-required SPA shell/);
   assert.match(source, /activeWebDownloads = new Map\(\)/);
   assert.match(source, /const body = await fetchPublicWeb\(target\); await rememberWebSource\(target, target\.hostname\)/);
   assert.doesNotMatch(source, /await rememberWebSource\(target, target\.hostname\); return truncate\(webText\(await fetchPublicWeb\(target\)\)/);

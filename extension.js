@@ -682,11 +682,25 @@ async function webDownload(url, requestedMaxBytes) {
     return `Downloaded ${name} as ${id} (${data.length} bytes, ${contentType}). ${text ? `Use read_downloaded_web_file with id "${id}" to inspect it.` : 'This is a binary asset; it is retained only as task-scoped evidence and cannot be executed or written by a worker.'}`;
   } finally { clearTimeout(timer); }
 }
-function readDownloadedWebFile(id, startLine, endLine, pattern, flags) {
+function readDownloadedWebFile(id, startLine, endLine, pattern, flags, startOffset, endOffset) {
   const item = activeWebDownloads.get(String(id || ''));
   if (!item) return 'No downloaded web file with that id exists in this task.';
   if (!item.text) return `Downloaded file ${item.name} is binary (${item.contentType}, ${item.data.length} bytes) and has no safe text preview.`;
-  return `Downloaded web file: ${item.name} (${item.url})\n` + readFileContent(item.data.toString('utf8'), startLine, endLine, pattern, flags);
+  const content = item.data.toString('utf8');
+  if (startOffset !== undefined || endOffset !== undefined) {
+    const start = Math.max(0, Number(startOffset) || 0); const end = Math.min(content.length, Math.max(start, Number(endOffset) || start + 24000));
+    return `Downloaded web file: ${item.name} (${item.url})\nCharacters ${start}-${end} of ${content.length}:\n` + content.slice(start, Math.min(end, start + 24000));
+  }
+  return `Downloaded web file: ${item.name} (${item.url})\n` + readFileContent(content, startLine, endLine, pattern, flags);
+}
+function searchDownloadedWebFile(id, query, maxResults) {
+  const item = activeWebDownloads.get(String(id || '')); const needle = String(query || '');
+  if (!item) return 'No downloaded web file with that id exists in this task.';
+  if (!item.text) return `Downloaded file ${item.name} is binary and cannot be searched as text.`;
+  if (!needle) return 'Provide a non-empty literal search query.';
+  const content = item.data.toString('utf8'); const limit = Math.max(1, Math.min(30, Number(maxResults) || 12)); const matches = []; let offset = 0;
+  while (matches.length < limit) { const found = content.indexOf(needle, offset); if (found < 0) break; const before = Math.max(0, found - 180); const after = Math.min(content.length, found + needle.length + 360); matches.push(`offset ${found}: ${content.slice(before, after).replace(/\s+/g, ' ')}`); offset = found + Math.max(1, needle.length); }
+  return matches.length ? `Matches in ${item.name} (${item.url}):\n` + matches.join('\n\n') : `No literal matches for ${JSON.stringify(needle)} in ${item.name}.`;
 }
 function truncate(value, limit = 14000) {
   const text = String(value ?? '');
@@ -817,8 +831,9 @@ const tools = [
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace. Private and LAN addresses are blocked. Use read_downloaded_web_file for textual source files after downloading.', parameters: { type: 'object', properties: { url: { type: 'string' }, maxBytes: { type: 'number', minimum: 1024, maximum: 4194304, description: 'Optional cap; defaults to 1 MiB and is capped at 4 MiB.' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'read_downloaded_web_file', description: 'Read a UTF-8 textual file previously obtained with web_download. The file exists only for this task and is read-only. Optional line bounds and regex filtering work like read_file.', parameters: { type: 'object', properties: { id: { type: 'string' }, startLine: { type: 'number', minimum: 1 }, endLine: { type: 'number', minimum: 1 }, pattern: { type: 'string', maxLength: 256 }, flags: { type: 'string' } }, required: ['id'] } } },
+  { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace. Private and LAN addresses are blocked. Use it for raw HTML, source files, static bundles, or source maps; then inspect text with read_downloaded_web_file or search_downloaded_web_file.', parameters: { type: 'object', properties: { url: { type: 'string' }, maxBytes: { type: 'number', minimum: 1024, maximum: 4194304, description: 'Optional cap; defaults to 1 MiB and is capped at 4 MiB.' } }, required: ['url'] } } },
+  { type: 'function', function: { name: 'read_downloaded_web_file', description: 'Read a UTF-8 textual file previously obtained with web_download. The file exists only for this task and is read-only. Optional line bounds and regex filtering work like read_file. For minified one-line assets, use startOffset/endOffset (character offsets, at most 24,000 characters per call).', parameters: { type: 'object', properties: { id: { type: 'string' }, startLine: { type: 'number', minimum: 1 }, endLine: { type: 'number', minimum: 1 }, pattern: { type: 'string', maxLength: 256 }, flags: { type: 'string' }, startOffset: { type: 'number', minimum: 0 }, endOffset: { type: 'number', minimum: 0 } }, required: ['id'] } } },
+  { type: 'function', function: { name: 'search_downloaded_web_file', description: 'Search literal text in a previously downloaded textual web file. Returns character offsets and short context, useful for minified JavaScript bundles and source maps.', parameters: { type: 'object', properties: { id: { type: 'string' }, query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 30 } }, required: ['id', 'query'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. In Full system mode, project-local non-sensitive changes proceed without confirmation; other writes require user approval. Protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
   { type: 'function', function: { name: 'delete_file', description: 'Delete one file in the current workspace. Available only in Full system mode. Project-local non-sensitive deletions proceed without confirmation and retain a rollback checkpoint.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'rollback_last_change', description: 'Restore the most recent file change made by the agent from a local checkpoint. Requires user approval.', parameters: { type: 'object', properties: {} } } },
@@ -828,7 +843,7 @@ const tools = [
   { type: 'function', function: { name: 'git_log', description: 'Read recent Git commits. No changes are made.', parameters: { type: 'object', properties: { count: { type: 'number', minimum: 1, maximum: 50 } } } } },
   { type: 'function', function: { name: 'save_skill', description: 'Save a reusable local playbook as Markdown guidance for future tasks. This does not add tools or system permissions. Requires user approval.', parameters: { type: 'object', properties: { name: { type: 'string' }, instructions: { type: 'string' } }, required: ['name', 'instructions'] } } }
 ];
-const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch', 'web_download', 'read_downloaded_web_file']);
+const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']);
 const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name));
 
 async function filesRecursive(dir, base, result) {
@@ -867,7 +882,8 @@ async function executeTool(call) {
     if (call.function.name === 'web_search') return await webSearch(args.query, args.maxResults);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
     if (call.function.name === 'web_download') return await webDownload(args.url, args.maxBytes);
-    if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags);
+    if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags, args.startOffset, args.endOffset);
+    if (call.function.name === 'search_downloaded_web_file') return searchDownloadedWebFile(args.id, args.query, args.maxResults);
     if (call.function.name === 'write_file') {
       updateTaskUi('implement', 'active', 'Applying workspace change.');
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
@@ -1132,7 +1148,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
   const priorRequestContext = lastUser ? `\n\nCandidate previous user request (use it only when it clarifies the newest task; otherwise ignore it):\n${truncate(lastUser.content, 4000)}` : '';
   const webAuthorization = webEnabled()
-    ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search and web_fetch for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If a fetch or search fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
+    ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search, web_fetch, and web_download for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. If web_fetch returns a JavaScript-required SPA shell, that is not a blocker: use web_download on the page to inspect raw HTML, download referenced public static JS/source-map assets, and use search_downloaded_web_file or offset reads for minified files. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If retrieval fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
     : '\n\nPublic web access is OFF. Do not claim to have fetched public sources. If the task requires an external source, report that the Globe setting must be enabled or use supplied local material.';
   const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
