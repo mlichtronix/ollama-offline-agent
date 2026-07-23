@@ -473,13 +473,14 @@ async function dispatchWorkerPlan(task, health, plan, lastAssistant, signal) {
   }
   return { health, results };
 }
-async function planWorkerAssignments(task, workers, lastAssistant, maxTasks, masterSession) {
+async function planWorkerAssignments(task, workers, lastAssistant, lastUser, maxTasks, masterSession) {
   const fallback = fallbackWorkerPlan(workers, maxTasks);
   const roster = workers.map(worker => `- id: ${worker.id}; name: ${worker.name}; model: ${worker.model}; runtime profile: ${workerCapabilityDescription(worker)}`).join('\n');
   const plannerSystem = `You are the delegation planner for a coding-agent master. Produce distinct expert research assignments for available read-only workers. The master alone writes files, runs commands, integrates changes, and tests. Give each worker a non-overlapping specialty and a concrete subtask relevant to the user's request. Never assign image analysis without vision, tool-dependent research without tool_calling, large source/context analysis without an adequate context requirement, or latency-sensitive/long-running work without fast_inference. Write masterFocus, role, task, and requires in English so every worker receives an English assignment while preserving all user constraints. requires must contain every capability needed, selected only from: ${[...workerRequirementNames].join(', ')}. Return only JSON: {"masterFocus":"...","assignments":[{"workerId":"...","role":"...","task":"...","requires":["project_files","tool_calling"]}]}. Use at most one assignment per worker. Available workers:\n${roster}`;
   const plannerGraph = ' First decide whether delegation is worthwhile. For a direct, narrow, or low-risk task return delegate:false, a short delegationReason, and no assignments. Otherwise return delegate:true, a short delegationReason, and no more than ' + maxTasks + ' assignments. An explicit user maximum is an upper bound, not a requirement to use that many workers. When there are fewer workers than explicitly requested expert topics, consolidate those requested topics into the available worker assignments instead of substituting generic roles. Each assignment may include dependsOn as an array of earlier workerId values. Use dependencies only when the later expert genuinely needs the earlier report. Dependencies must form an acyclic graph.';
   try {
-    const response = await chatWithMasterFailover([{ role: 'system', content: plannerSystem + plannerGraph }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], undefined, [], masterSession);
+    const priorRequest = lastUser ? `\n\nCandidate previous user request: ${truncate(lastUser.content, 4000)}\nUse it only if it clarifies the newest task.` : '';
+    const response = await chatWithMasterFailover([{ role: 'system', content: plannerSystem + plannerGraph + priorRequest }, ...(lastAssistant ? [lastAssistant] : []), { role: 'user', content: task }], undefined, [], masterSession);
     return parseDelegationPlan(response.message?.content, workers, maxTasks) || fallback;
   } catch (error) {
     if (error.name === 'AbortError') throw error;
@@ -571,6 +572,7 @@ function readChatMessages(ids) {
   return messages.length ? truncate(messages.map(event => `[${event.id}] ${event.kind} ${event.createdAt || ''}\n${event.text}`).join('\n\n'), limit) : '(no matching chat messages)';
 }
 function latestAssistantContext() { return chatStore.latestAssistant(); }
+function latestUserContext() { return chatStore.latestUser(); }
 async function loadSkills(task) {
   if (!skillsDir) return '';
   try {
@@ -716,6 +718,7 @@ function runCommand(command, requestedCwd) {
 function isGitRepository(cwd = root()) { return new Promise(resolve => cp.execFile('git', ['rev-parse', '--is-inside-work-tree'], { cwd, windowsHide: true }, error => resolve(!error))); }
 function isEndpointLimitError(error) { return /(?:\b429\b|usage limit|rate limit|quota|too many requests|credits? (?:have )?been exhausted)/i.test(String(error?.message || error)); }
 function workerSpeed(worker) { return Number(worker?.profile?.benchmark?.tokensPerSecond || workerBenchmarks.get(worker?.id)?.benchmark?.tokensPerSecond || 0); }
+function masterRuntimeKey(runtime = {}) { return `${normalizeEndpoint(runtime.endpoint || config().get('endpoint'))}\n${String(runtime.model || config().get('model') || '').trim()}`; }
 function fallbackMasterCandidates(health, { needsVision = false } = {}) {
   const requestedContext = Number(config().get('contextWindow', 0)); const primaryEndpoint = normalizeEndpoint(config().get('endpoint')); const primaryModel = String(config().get('model') || '').trim();
   return health.filter(worker => worker.status === 'available').filter(worker => !(normalizeEndpoint(worker.endpoint) === primaryEndpoint && worker.model === primaryModel)).filter(worker => !needsVision || (worker.profile?.capabilities || []).map(value => String(value).toLowerCase()).includes('vision')).filter(worker => !requestedContext || !worker.profile?.contextLength || Number(worker.profile.contextLength) >= requestedContext).sort((left, right) => workerSpeed(right) - workerSpeed(left) || left.name.localeCompare(right.name));
@@ -727,6 +730,7 @@ async function chatWithMasterFailover(messages, onChunk, taskTools, session) {
     try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current); }
     catch (error) {
       if (!isEndpointLimitError(error) || !session.fallbacks.length) throw error;
+      session.limitedKeys.add(masterRuntimeKey(session.current));
       if (streamedContent) messages.push({ role: 'assistant', content: streamedContent });
       const worker = session.fallbacks.shift(); session.current = masterRuntimeForWorker(worker);
       const speed = workerSpeed(worker); const speedText = speed ? ` at ${speed} tok/s` : '';
@@ -808,8 +812,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts. Create, edit, and delete operations for non-sensitive files physically inside the open workspace run autonomously with rollback checkpoints. Writes outside the workspace, sensitive files, restores, and playbook saves still require approval; destructive system commands remain blocked.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
-  const lastAssistant = latestAssistantContext();
-  log(lastAssistant ? 'Context: the previous assistant answer was supplied as candidate context; older history is available on demand.' : 'Context: no previous assistant answer is available; complete local history is searchable on demand.');
+  const lastAssistant = latestAssistantContext(); const lastUser = latestUserContext();
+  log(lastAssistant ? `Context: the previous assistant answer${lastUser ? ' and previous user request' : ''} were supplied as candidate context; older history is available on demand.` : 'Context: no previous assistant answer is available; complete local history is searchable on demand.');
   // Bind uploads to this exact prompt. A resource that is merely selected is
   // not silently carried into a later, unrelated request.
   const attachedPaths = new Set(attachments.map(item => item.path).filter(Boolean));
@@ -826,12 +830,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  let workerContext = ''; const masterSession = { current: {}, fallbacks: [] };
+  let workerContext = ''; const masterSession = { current: {}, fallbacks: [], limitedKeys: new Set() };
   if (configuredWorkers().some(worker => worker.enabled)) {
     if (!continuationMessages) { updateTaskUi('research', 'active', 'Checking available expert workers.'); log('Checking configured read-only workers before starting the master task.'); }
     const workerController = createActiveAbortController();
     let health;
-    try { health = await workerPool.health({ signal: workerController.signal }); }
+    try { health = await workerPool.health({ benchmark: true, signal: workerController.signal }); }
     finally { releaseActiveAbortController(workerController); }
     throwIfCancelled(); const available = health.filter(worker => worker.status === 'available');
     masterSession.fallbacks = fallbackMasterCandidates(health, { needsVision: images.length > 0 });
@@ -840,7 +844,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     if (!continuationMessages && available.length) {
       log(`Planning distinct expert assignments for ${available.length} available worker${available.length === 1 ? '' : 's'}.`);
       const maxWorkerTasks = available.length;
-      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, maxWorkerTasks, masterSession);
+      const plan = await planWorkerAssignments(taskWithResources, available, lastAssistant, lastUser, maxWorkerTasks, masterSession);
+      const skippedLimitedWorkers = plan.assignments.filter(assignment => { const worker = available.find(item => item.id === assignment.workerId); return worker && masterSession.limitedKeys.has(masterRuntimeKey(worker)); });
+      if (skippedLimitedWorkers.length) {
+        plan.assignments = plan.assignments.filter(assignment => !skippedLimitedWorkers.includes(assignment));
+        log(`Skipping ${skippedLimitedWorkers.map(assignment => available.find(worker => worker.id === assignment.workerId)?.name).join(', ')} because its endpoint/model has already reported a usage limit.`);
+      }
       for (const assignment of plan.assignments) { const worker = available.find(item => item.id === assignment.workerId); if (worker) log(`Assigned ${worker.name} as ${assignment.role}: ${assignment.task}`); }
       if (!plan.assignments.length) log('Worker delegation skipped: ' + plan.delegationReason);
       throwIfCancelled();
@@ -858,7 +867,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   }
   const modeInstruction = taskMode === 'plan' ? '\n\nYou are in Plan mode. Use only read-only evidence gathering. Do not write files, run commands, save skills, or request approvals. Return a concise implementation plan with scope, files, validation steps, risks, and open questions.' : taskMode === 'ask' ? '\n\nYou are in Ask mode. Answer or inspect with read-only tools only; do not write files, run commands, save skills, or request approvals.' : '\n\nYou are in Execute mode. After inspecting relevant context, implement the request, verify it, and summarize the result.';
   const taskTools = taskMode === 'execute' ? tools : tools.filter(tool => !new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(tool.function.name));
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  const priorRequestContext = lastUser ? `\n\nCandidate previous user request (use it only when it clarifies the newest task; otherwise ignore it):\n${truncate(lastUser.content, 4000)}` : '';
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;

@@ -81,6 +81,7 @@ test('chat store persists UTF-8 history and matching conversation context', asyn
     assert.equal(restored.history.length, 2);
     assert.equal(restored.history[0].id, user.id);
     assert.equal(restored.history[0].text, 'Zadanie: over UTF-8');
+    assert.equal(restored.latestUser().content, 'Zadanie: over UTF-8');
     assert.equal(restored.latestAssistant().content, 'Výsledok je správny.');
     assert.equal(restored.remove('assistant-1').kind, 'assistant');
     await restored.save();
@@ -113,6 +114,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /read_chat_messages/);
   assert.match(source, /most recent assistant answer is always supplied as candidate context/);
   assert.match(source, /latestAssistantContext/);
+  assert.match(source, /latestUserContext/);
+  assert.match(source, /benchmark: true/);
+  assert.match(source, /Candidate previous user request/);
   assert.match(source, /function steer\(/);
   assert.match(source, /function queueAgentRequest/);
   assert.match(source, /Steering accepted at the completed subtask boundary/);
@@ -242,6 +246,8 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatSource, /<details class="review-checks"/);
   assert.match(chatSource, /<details class="review-files"/);
   assert.match(chatSource, /<details class="task-activity"/);
+  assert.doesNotMatch(chatSource, /<ol>\$\{timeline\}<\/ol>/);
+  assert.match(chatSource, /<i aria-hidden="true"><\/i><strong>/);
   assert.match(chatSource, /worker\$\{activeWorkers/);
   assert.match(chatSource, /const undoSvg/);
   assert.match(chatSource, /class="task-undo"/);
