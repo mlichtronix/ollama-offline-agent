@@ -210,6 +210,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(workerPoolSource, /modelProfiles/);
   assert.match(workerPoolSource, /function chatWithIdleTimeout/);
   assert.match(workerPoolSource, /Worker timed out after/);
+  assert.match(workerPoolSource, /requires: Array\.isArray\(item\.requires\)/);
   assert.match(source, /const activeAbortControllers = new Set\(\)/);
   assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
   assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);
@@ -285,7 +286,10 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /name: 'delete_file'/);
   assert.match(source, /Deletion is limited to a file inside the current workspace/);
   assert.match(source, /function canAutonomouslyMutateWorkspace/);
-  assert.match(source, /if \(!canAutonomouslyMutateWorkspace\(target\)\)/);
+  assert.match(source, /if \(!canAutonomouslyMutateWorkspace\(target, args\.path\)\)/);
+  assert.match(source, /function isFilesystemRoot/);
+  assert.match(source, /current workspace is the filesystem root/);
+  assert.match(source, /Unix-style \/workspace paths are not valid project paths on Windows/);
   assert.match(source, /function isEndpointLimitError/);
   assert.match(source, /function fallbackMasterCandidates/);
   assert.match(source, /chatWithMasterFailover/);

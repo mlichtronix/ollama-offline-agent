@@ -308,12 +308,13 @@ function describeExecutionEnvironment() {
   if (environmentDescription) return environmentDescription;
   const detected = detectedEnvironment();
   const runner = detected.runner ? `${detected.runner.label} (${detected.runner.executable})` : 'no usable command shell';
-  environmentDescription = `Execution environment (authoritative, do not probe shell syntax first): ${detected.remote}; extension host OS: ${detected.platform} (${process.platform}, ${process.arch}, ${process.release.name || 'Node'} ${process.version}); run_command executes through detected ${runner}; configured VS Code integrated-terminal profile: ${detected.configuredProfile}; shell candidates: ${detected.shellCandidates.join(', ') || 'none detected'}. Detected command-line programs: ${detected.installed.join(', ') || 'none detected'}. Use commands and path syntax for this extension-host OS. The visible VS Code client may be on another device; it is not the command execution environment.`;
+  environmentDescription = `Execution environment (authoritative, do not probe shell syntax first): ${detected.remote}; extension host OS: ${detected.platform} (${process.platform}, ${process.arch}, ${process.release.name || 'Node'} ${process.version}); open project workspace: ${root() || 'none'}; run_command executes through detected ${runner}; configured VS Code integrated-terminal profile: ${detected.configuredProfile}; shell candidates: ${detected.shellCandidates.join(', ') || 'none detected'}. Detected command-line programs: ${detected.installed.join(', ') || 'none detected'}. Use commands and path syntax for this extension-host OS. Create project files with workspace-relative paths, never invented /workspace placeholders. The visible VS Code client may be on another device; it is not the command execution environment.`;
   return environmentDescription;
 }
 function languageInstruction() { const language = config().get('language', 'auto'); return language === 'auto' ? 'Reply in the language of the newest user message.' : `Reply in language code ${language}.`; }
 let skillsDir;
 function root() { return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath; }
+function isFilesystemRoot(directory) { const resolved = directory ? path.resolve(directory) : ''; return Boolean(resolved) && resolved === path.parse(resolved).root; }
 function systemAccess() { return config().get('accessMode') !== 'workspace'; }
 function guardedSystem() { return config().get('accessMode') === 'guardedSystem'; }
 function fullSystem() { return config().get('accessMode') === 'fullSystem'; }
@@ -328,10 +329,11 @@ function isWorkspaceTarget(target) {
     return realProbe === realWorkspace || realProbe.startsWith(prefix);
   } catch { return false; }
 }
-function canAutonomouslyMutateWorkspace(target) { return fullSystem() && isWorkspaceTarget(target) && !isSensitiveTarget(target) && !matchesProtected(target); }
+function canAutonomouslyMutateWorkspace(target, requestedPath = '') { return fullSystem() && !path.isAbsolute(String(requestedPath || '')) && isWorkspaceTarget(target) && !isSensitiveTarget(target) && !matchesProtected(target); }
 function resolveTarget(input) {
   const base = root();
   if (!base) throw new Error('Open a folder workspace before using the agent.');
+  if (process.platform === 'win32' && /^\/(?!\/)/.test(String(input || ''))) throw new Error('Use a workspace-relative path or a Windows drive-letter path. Unix-style /workspace paths are not valid project paths on Windows.');
   const candidate = path.resolve(path.isAbsolute(input || '') && systemAccess() ? input : base, path.isAbsolute(input || '') && systemAccess() ? '.' : (input || '.'));
   if (systemAccess()) return candidate;
   const prefix = base.endsWith(path.sep) ? base : base + path.sep;
@@ -481,6 +483,7 @@ function readOnlyWorkerViolation(task) {
   const patterns = [
     /\b(?:run|execute|launch|invoke)\b[\s\S]{0,48}\b(?:command|shell|terminal|bandit|ruff|pytest|tests?|lint|build|compile|pip|npm|git)\b/i,
     /\b(?:install|uninstall|write|create|modify|edit|delete|rename|move)\b[\s\S]{0,48}\b(?:files?|code|scripts?|scanner|skills?|playbook|packages?|dependenc)/i,
+    /\b(?:create|implement|write|build|develop|generate)\b[\s\S]{0,64}\b(?:python|implementation|project|application|module|script|code|framework|solution)\b/i,
     /\b(?:display|show|post|publish|render)\b[\s\S]{0,48}\b(?:response|chat|user|conversation)\b/i,
     /\b(?:git\s+(?:commit|push|pull|checkout|merge)|npm\s+(?:install|test|run)|pip\s+install)\b/i
   ];
@@ -496,6 +499,7 @@ function assignmentResult(results, workerId) {
 }
 function workerResultUsable(result) {
   if (!result?.text || result.error || result.quality?.accepted === false) return false;
+  if ((result.requires || []).includes('public_web') && !result.report?.fetchedUrls?.length) return false;
   return !/\b(?:i\s+(?:cannot|can't|am unable to)|unable to (?:complete|perform)|no (?:shell|write|command|tool) capability|cannot complete)\b/i.test(String(result.text));
 }
 function fallbackWorkerPlan(workers, maxTasks) {
@@ -782,7 +786,9 @@ const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name)
 
 async function filesRecursive(dir, base, result) {
   const ignored = new Set(['.git', '.ollama-agent', 'node_modules', '.next', 'dist', 'build', '.venv', '__pycache__']);
-  const entries = await fsp.readdir(dir, { withFileTypes: true });
+  let entries;
+  try { entries = await fsp.readdir(dir, { withFileTypes: true }); }
+  catch (error) { if (['EACCES', 'EPERM', 'ENOENT'].includes(error.code)) return; throw error; }
   for (const item of entries) {
     if (ignored.has(item.name)) continue;
     const full = path.join(dir, item.name);
@@ -818,7 +824,7 @@ async function executeTool(call) {
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
       let before = ''; try { before = await fsp.readFile(target, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       log(`Proposed diff for ${args.path}:\n${writePreview(before, args.content)}`);
-      if (!canAutonomouslyMutateWorkspace(target)) {
+      if (!canAutonomouslyMutateWorkspace(target, args.path)) {
         const answer = await vscode.window.showWarningMessage(`Agent wants to write ${target}. Review the proposed diff in Output.`, { modal: true }, 'Allow');
         if (answer !== 'Allow') return 'User denied file write.';
       }
@@ -837,7 +843,7 @@ async function executeTool(call) {
       const info = await fsp.stat(target).catch(error => error.code === 'ENOENT' ? undefined : Promise.reject(error));
       if (!info) return `File does not exist: ${args.path}`;
       if (!info.isFile()) return 'Deletion is limited to individual files; directories are not supported.';
-      if (!canAutonomouslyMutateWorkspace(target)) {
+      if (!canAutonomouslyMutateWorkspace(target, args.path)) {
         const answer = await vscode.window.showWarningMessage(`Agent wants to delete ${target}. A rollback checkpoint will be kept.`, { modal: true }, 'Delete file');
         if (answer !== 'Delete file') return 'User denied file deletion.';
       }
@@ -1003,6 +1009,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
+  if (isFilesystemRoot(root())) return vscode.window.showErrorMessage(`Open the project folder itself before running the agent. The current workspace is the filesystem root (${root()}), which is intentionally not allowed for agent tasks.`);
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
   if (!task) return;
   await ensureWorkspaceState();
