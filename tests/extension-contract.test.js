@@ -234,6 +234,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /cite a URL as a source only after web_fetch successfully returned that exact page/i);
   assert.match(source, /Public web access is ON \(the Globe setting is enabled\)/);
   assert.match(source, /function workerFailureReason/);
+  assert.match(source, /name: 'web_download'/);
+  assert.match(source, /name: 'read_downloaded_web_file'/);
+  assert.match(source, /activeWebDownloads = new Map\(\)/);
   assert.match(source, /const body = await fetchPublicWeb\(target\); await rememberWebSource\(target, target\.hostname\)/);
   assert.doesNotMatch(source, /await rememberWebSource\(target, target\.hostname\); return truncate\(webText\(await fetchPublicWeb\(target\)\)/);
   assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);

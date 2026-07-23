@@ -34,6 +34,10 @@ let activeAgentMessages;
 const queuedAgentRequests = [];
 const promptStates = new Map();
 let activeWebSources = [];
+// Downloaded web assets are task-scoped, in-memory research material. They
+// are deliberately never written into the user's workspace by a read-only
+// worker, and are discarded before the next task starts.
+let activeWebDownloads = new Map();
 const workerBenchmarks = new Map();
 let activeTaskUi;
 let workerDiscoveryController;
@@ -652,6 +656,38 @@ function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|
 async function rememberWebSource(url, title) { try { const target = safeWebUrl(url); const existing = activeWebSources.find(item => item.url === target.toString()); if (existing) return existing; const source = { title: title || target.hostname, url: target.toString(), favicon: '' }; activeWebSources.push(source); try { const response = await fetch(new URL('/favicon.ico', target), { redirect: 'error', headers: { Accept: 'image/*', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); const data = Buffer.from(await response.arrayBuffer()); const type = response.headers.get('content-type') || 'image/x-icon'; if (response.ok && data.length && data.length <= 64 * 1024 && /^image\//i.test(type)) source.favicon = `data:${type};base64,${data.toString('base64')}`; } catch {} return source; } catch { return undefined; } }
 async function webSearch(query, limit) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const text = String(query || '').trim(); if (!text) return 'Provide a search query.'; const address = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(text)}`; const html = await fetchPublicWeb(address); const results = []; const pattern = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a|class="result__snippet"[^>]*>([\s\S]*?)<\/div/gi; let match; while ((match = pattern.exec(html)) && results.length < Math.max(1, Math.min(10, Number(limit) || 5))) { const href = match[1]; const title = webText(match[2]); const snippet = webText(match[3] || match[4] || ''); if (href && title) results.push(`${title}\n${href}\n${snippet}`); } return results.length ? results.join('\n\n') : 'No search results were parsed.'; }
 async function webFetch(url) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const target = safeWebUrl(url); const body = await fetchPublicWeb(target); await rememberWebSource(target, target.hostname); return truncate(webText(body), 14000); }
+function downloadedWebFileName(target, response) {
+  const disposition = String(response.headers.get('content-disposition') || '');
+  const supplied = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i)?.[1] || path.basename(target.pathname) || 'download';
+  return path.basename(decodeURIComponent(supplied).replace(/[\\/:*?"<>|]/g, '_')).slice(0, 180) || 'download';
+}
+function downloadedWebFileIsText(name, contentType) {
+  return /^text\//i.test(contentType) || /(?:json|javascript|ecmascript|xml|yaml|toml|graphql|lua|python|x-sh|wasm-text)/i.test(contentType) || /\.(?:[cm]?js|ts|tsx|jsx|json|md|txt|py|lua|c|cc|cpp|h|hpp|cs|java|go|rs|php|rb|sh|ps1|yml|yaml|toml|xml|html?|css|svg)$/i.test(name);
+}
+async function webDownload(url, requestedMaxBytes) {
+  if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.';
+  const target = safeWebUrl(url); const maxBytes = Math.max(1024, Math.min(4 * 1024 * 1024, Number(requestedMaxBytes) || 1024 * 1024));
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'application/octet-stream,text/plain,text/*;q=0.9,*/*;q=0.1', 'User-Agent': 'Ollama-Offline-Agent/1.0' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const advertisedLength = Number(response.headers.get('content-length') || 0);
+    if (advertisedLength > maxBytes) throw new Error(`download is ${advertisedLength} bytes, above the ${maxBytes}-byte task limit`);
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length > maxBytes) throw new Error(`download is ${data.length} bytes, above the ${maxBytes}-byte task limit`);
+    const name = downloadedWebFileName(target, response); const contentType = String(response.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim(); const id = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const text = downloadedWebFileIsText(name, contentType);
+    activeWebDownloads.set(id, { id, url: target.toString(), name, contentType, data, text });
+    await rememberWebSource(target, name);
+    return `Downloaded ${name} as ${id} (${data.length} bytes, ${contentType}). ${text ? `Use read_downloaded_web_file with id "${id}" to inspect it.` : 'This is a binary asset; it is retained only as task-scoped evidence and cannot be executed or written by a worker.'}`;
+  } finally { clearTimeout(timer); }
+}
+function readDownloadedWebFile(id, startLine, endLine, pattern, flags) {
+  const item = activeWebDownloads.get(String(id || ''));
+  if (!item) return 'No downloaded web file with that id exists in this task.';
+  if (!item.text) return `Downloaded file ${item.name} is binary (${item.contentType}, ${item.data.length} bytes) and has no safe text preview.`;
+  return `Downloaded web file: ${item.name} (${item.url})\n` + readFileContent(item.data.toString('utf8'), startLine, endLine, pattern, flags);
+}
 function truncate(value, limit = 14000) {
   const text = String(value ?? '');
   return text.length > limit ? text.slice(0, limit) + `\n[truncated at ${limit} characters]` : text;
@@ -781,6 +817,8 @@ const tools = [
   { type: 'function', function: { name: 'search_text', description: 'Search literal text in text files.', parameters: { type: 'object', properties: { query: { type: 'string' }, directory: { type: 'string' } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_search', description: 'Search the public web for current information. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 10 } }, required: ['query'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
+  { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace. Private and LAN addresses are blocked. Use read_downloaded_web_file for textual source files after downloading.', parameters: { type: 'object', properties: { url: { type: 'string' }, maxBytes: { type: 'number', minimum: 1024, maximum: 4194304, description: 'Optional cap; defaults to 1 MiB and is capped at 4 MiB.' } }, required: ['url'] } } },
+  { type: 'function', function: { name: 'read_downloaded_web_file', description: 'Read a UTF-8 textual file previously obtained with web_download. The file exists only for this task and is read-only. Optional line bounds and regex filtering work like read_file.', parameters: { type: 'object', properties: { id: { type: 'string' }, startLine: { type: 'number', minimum: 1 }, endLine: { type: 'number', minimum: 1 }, pattern: { type: 'string', maxLength: 256 }, flags: { type: 'string' } }, required: ['id'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. In Full system mode, project-local non-sensitive changes proceed without confirmation; other writes require user approval. Protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
   { type: 'function', function: { name: 'delete_file', description: 'Delete one file in the current workspace. Available only in Full system mode. Project-local non-sensitive deletions proceed without confirmation and retain a rollback checkpoint.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'rollback_last_change', description: 'Restore the most recent file change made by the agent from a local checkpoint. Requires user approval.', parameters: { type: 'object', properties: {} } } },
@@ -790,7 +828,7 @@ const tools = [
   { type: 'function', function: { name: 'git_log', description: 'Read recent Git commits. No changes are made.', parameters: { type: 'object', properties: { count: { type: 'number', minimum: 1, maximum: 50 } } } } },
   { type: 'function', function: { name: 'save_skill', description: 'Save a reusable local playbook as Markdown guidance for future tasks. This does not add tools or system permissions. Requires user approval.', parameters: { type: 'object', properties: { name: { type: 'string' }, instructions: { type: 'string' } }, required: ['name', 'instructions'] } } }
 ];
-const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch']);
+const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'web_fetch', 'web_download', 'read_downloaded_web_file']);
 const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name));
 
 async function filesRecursive(dir, base, result) {
@@ -828,6 +866,8 @@ async function executeTool(call) {
     }
     if (call.function.name === 'web_search') return await webSearch(args.query, args.maxResults);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
+    if (call.function.name === 'web_download') return await webDownload(args.url, args.maxBytes);
+    if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags);
     if (call.function.name === 'write_file') {
       updateTaskUi('implement', 'active', 'Applying workspace change.');
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
@@ -1017,6 +1057,7 @@ function isDirectAgentQuestion(task) {
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
+  activeWebDownloads = new Map();
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   if (isFilesystemRoot(root())) return vscode.window.showErrorMessage(`Open the project folder itself before running the agent. The current workspace is the filesystem root (${root()}), which is intentionally not allowed for agent tasks.`);
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
