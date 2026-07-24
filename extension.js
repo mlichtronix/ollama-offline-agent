@@ -696,7 +696,7 @@ async function webFetch(url) {
   const rendered = await browserOpen(target.toString(), 'chrome', 8000);
   if (/^Tool error:/i.test(rendered)) return `The initial fetch returned a JavaScript-required shell. Automatic browser rendering also failed:\n${rendered}`;
   const bundle = rendered.match(/^\s*-\s+(https?:\/\/[^\s]+\.(?:[cm]?js)(?:\?[^\s]*)?)\s*$/im)?.[1]; let download = '';
-  if (bundle) { try { download = '\n\nThe extension also downloaded the primary JavaScript bundle for source inspection:\n' + await webDownload(bundle, 4 * 1024 * 1024); } catch (error) { download = `\n\nAutomatic primary-bundle download failed: ${error.message}`; } }
+  if (bundle) { try { download = '\n\nThe extension also downloaded the primary JavaScript bundle for source inspection:\n' + await webDownload(bundle); } catch (error) { download = `\n\nAutomatic primary-bundle download failed: ${error.message}`; } }
   return `The initial fetch returned a JavaScript-required shell. The extension automatically rendered it with the controlled browser; use the rendered DOM and discovered resources below, then inspect relevant source bundles with web_download and search_downloaded_web_file.${download}\n\n${rendered}`;
 }
 function explicitPublicUrls(text) {
@@ -722,17 +722,14 @@ function downloadedWebFileName(target, response) {
 function downloadedWebFileIsText(name, contentType) {
   return /^text\//i.test(contentType) || /(?:json|javascript|ecmascript|xml|yaml|toml|graphql|lua|python|x-sh|wasm-text)/i.test(contentType) || /\.(?:[cm]?js|ts|tsx|jsx|json|md|txt|py|lua|c|cc|cpp|h|hpp|cs|java|go|rs|php|rb|sh|ps1|yml|yaml|toml|xml|html?|css|svg)$/i.test(name);
 }
-async function webDownload(url, requestedMaxBytes) {
+async function webDownload(url) {
   if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.';
-  const target = safeWebUrl(url); const maxBytes = Math.max(1024, Math.min(4 * 1024 * 1024, Number(requestedMaxBytes) || 1024 * 1024));
+  const target = safeWebUrl(url);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 20000);
   try {
     const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'application/octet-stream,text/plain,text/*;q=0.9,*/*;q=0.1', 'User-Agent': 'Ollama-Offline-Agent/1.0' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const advertisedLength = Number(response.headers.get('content-length') || 0);
-    if (advertisedLength > maxBytes) throw new Error(`download is ${advertisedLength} bytes, above the ${maxBytes}-byte task limit`);
     const data = Buffer.from(await response.arrayBuffer());
-    if (data.length > maxBytes) throw new Error(`download is ${data.length} bytes, above the ${maxBytes}-byte task limit`);
     const name = downloadedWebFileName(target, response); const contentType = String(response.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim(); const id = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const text = downloadedWebFileIsText(name, contentType);
     activeEvidenceStore.recordDownload({ id, url: target.toString(), name, contentType, data, text });
@@ -915,7 +912,7 @@ const tools = [
   { type: 'function', function: { name: 'list_browsers', description: 'List installed browsers available to the agent and whether each can run the controlled headless renderer. Call this before browser_open when browser choice matters.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'browser_open', description: 'Render a public HTTP(S) page in an installed Chromium-based headless browser and return its JavaScript-rendered DOM. Uses a disposable profile and a filtering proxy that blocks private/LAN destinations and redirects. Call list_browsers first when choosing a browser. Chrome is preferred automatically for web compatibility; Edge is a fallback. It does not write downloads to the workspace.', parameters: { type: 'object', properties: { url: { type: 'string' }, browserId: { type: 'string', description: 'Optional id returned by list_browsers; otherwise preferred Chrome is used when installed.' }, waitMs: { type: 'number', minimum: 2000, maximum: 15000 } }, required: ['url'] } } },
   { type: 'function', function: { name: 'web_fetch', description: 'Read a public HTTP(S) web page by URL. Available only when the user enables web access with the Globe button; private and LAN addresses are blocked.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
-  { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace. Private and LAN addresses are blocked. Use it for raw HTML, source files, static bundles, or source maps; then inspect text with read_downloaded_web_file or search_downloaded_web_file.', parameters: { type: 'object', properties: { url: { type: 'string' }, maxBytes: { type: 'number', minimum: 1024, maximum: 4194304, description: 'Optional cap; defaults to 1 MiB and is capped at 4 MiB.' } }, required: ['url'] } } },
+  { type: 'function', function: { name: 'web_download', description: 'Download a public web file into task-scoped read-only memory for analysis. It never writes to the workspace and has no artificial file-size cap. Private and LAN addresses are blocked. Use it for raw HTML, source files, static bundles, or source maps; then inspect text with read_downloaded_web_file or search_downloaded_web_file.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
   { type: 'function', function: { name: 'read_downloaded_web_file', description: 'Read a UTF-8 textual file previously obtained with web_download. The file exists only for this task and is read-only. Optional line bounds and regex filtering work like read_file. For minified one-line assets, use startOffset/endOffset (character offsets, at most 24,000 characters per call).', parameters: { type: 'object', properties: { id: { type: 'string' }, startLine: { type: 'number', minimum: 1 }, endLine: { type: 'number', minimum: 1 }, pattern: { type: 'string', maxLength: 256 }, flags: { type: 'string' }, startOffset: { type: 'number', minimum: 0 }, endOffset: { type: 'number', minimum: 0 } }, required: ['id'] } } },
   { type: 'function', function: { name: 'search_downloaded_web_file', description: 'Search literal text in a previously downloaded textual web file. Returns character offsets and short context, useful for minified JavaScript bundles and source maps.', parameters: { type: 'object', properties: { id: { type: 'string' }, query: { type: 'string' }, maxResults: { type: 'number', minimum: 1, maximum: 30 } }, required: ['id', 'query'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Create or replace a UTF-8 text file. In Full system mode, project-local non-sensitive changes proceed without confirmation; other writes require user approval. Protected system paths are blocked.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
@@ -1008,7 +1005,7 @@ async function executeToolRaw(call) {
     if (call.function.name === 'list_browsers') return browserInventory();
     if (call.function.name === 'browser_open') return await browserOpen(args.url, args.browserId, args.waitMs);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
-    if (call.function.name === 'web_download') return await webDownload(args.url, args.maxBytes);
+    if (call.function.name === 'web_download') return await webDownload(args.url);
     if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags, args.startOffset, args.endOffset);
     if (call.function.name === 'search_downloaded_web_file') return searchDownloadedWebFile(args.id, args.query, args.maxResults);
     if (call.function.name === 'write_file') {
@@ -1255,6 +1252,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let invalidOutputNudges = 0;
   let completionVerifierNudges = 0;
   const failedToolCalls = new Map();
+  const completedLookupCalls = new Set();
+  let completedLookupPhase = '';
+  const idempotentLookupTools = new Set(['web_search', 'web_fetch', 'web_download', 'browser_open', 'list_browsers']);
   const requiresPlan = taskMode === 'execute' && !directAgentQuestion;
   let activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
   let promptRead = false;
@@ -1264,6 +1264,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const streamId = messageId(); let thinkingStarted = false;
       if (step === 1) updateTaskUi('analyze', 'active', 'Analyzing evidence and choosing the next action.');
       else updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', `Continuing agent work (step ${step}).`);
+      const visiblePhase = activeTaskRuntime?.activePhase() || 'work';
+      if (visiblePhase !== completedLookupPhase) { completedLookupCalls.clear(); completedLookupPhase = visiblePhase; }
       activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
       const data = await chatWithMasterFailover(messages, partial => {
@@ -1352,18 +1354,23 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', calls.map(c => c.function.name).join(', ')); log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
       for (const call of calls) {
         if (cancelled) break;
-        const result = await executeTool(call, activeTaskTools);
-        const outcome = parseToolResult(result);
         const callKey = `${call.function.name}\n${String(call.function.arguments || '')}`;
+        const repeatedLookup = idempotentLookupTools.has(call.function.name) && completedLookupCalls.has(callKey);
+        const result = repeatedLookup
+          ? serializeToolResult({ ok: false, tool: call.function.name, kind: 'error', phase: activeTaskRuntime?.activePhase() || 'work', content: `${call.function.name} with the same arguments already succeeded in this phase. Use that result, choose a different URL/query, or advance the task phase.` })
+          : await executeTool(call, activeTaskTools);
+        const outcome = parseToolResult(result);
         if (!outcome.ok && outcome.kind === 'error') {
           const failures = (failedToolCalls.get(callKey) || 0) + 1;
           failedToolCalls.set(callKey, failures);
           if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(outcome.content, 500)}`);
-        } else { failedToolCalls.delete(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; }
+        } else { failedToolCalls.delete(callKey); if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; }
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
         if (!outcome.ok && call.function.name === 'set_task_plan') messages.push({ role: 'user', content: 'Correct the plan rather than repeating it unchanged. A plan starts from Understand and may use Research → Analyze → Work → Implement → Verify → Review. Submit only `steps`, each with a concise `title` and one `phase`.' });
+        if (!outcome.ok && call.function.name === 'advance_task_phase') messages.push({ role: 'user', content: 'Follow the accepted plan in order. Advance only to the next pending phase named by the host error; do not skip a planned step.' });
+        if (repeatedLookup) messages.push({ role: 'user', content: 'Do not repeat the same successful web lookup in this phase. Use the already returned result, choose a different targeted URL/query, inspect a downloaded file, or advance to the next planned phase.' });
         if (pendingSteering) break;
       }
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }

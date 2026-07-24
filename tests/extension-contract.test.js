@@ -80,6 +80,7 @@ test('model adapter accepts only native or complete fallback tool calls', () => 
   assert.equal(unavailable.reason, 'unavailable_tool:write_file');
   assert.equal(isToolProtocolPrefix('<tools>'), true);
   assert.equal(isToolProtocolPrefix('Tools\n\nYou may call one or more functions.'), true);
+  assert.equal(isToolProtocolPrefix('{"type":"function","function":{"name":"set_task_plan"}}'), true);
   assert.equal(isToolProtocolPrefix('Tools are available locally.'), false);
   assert.equal(classifyModelMessage({ content: 'Use list_files {"directory":"."} and then explain the result.' }, tools).kind, 'final_answer');
 });
@@ -131,6 +132,8 @@ test('task plans may begin research after initial host analysis activity', () =>
   assert.equal(planned.ok, true);
   assert.equal(runtime.activePhase(), 'research');
   assert.equal(runtime.ui.plan[0].status, 'active');
+  assert.equal(runtime.advance('implement').ok, false);
+  assert.equal(runtime.advance('analyze').ok, true);
 });
 
 test('completion verifier requires observed validation after workspace changes', () => {
@@ -363,6 +366,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Public web access is ON \(the Globe setting is enabled\)/);
   assert.match(source, /function workerFailureReason/);
   assert.match(source, /name: 'web_download'/);
+  assert.doesNotMatch(source, /name: 'web_download'[\s\S]{0,600}maxBytes/);
+  assert.match(source, /async function webDownload\(url\)/);
+  assert.match(source, /completedLookupCalls/);
+  assert.match(source, /already succeeded in this phase/);
   assert.match(source, /name: 'read_downloaded_web_file'/);
   assert.match(source, /name: 'search_downloaded_web_file'/);
   assert.match(source, /JavaScript-required SPA page/);
