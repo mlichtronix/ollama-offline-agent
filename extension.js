@@ -724,7 +724,15 @@ async function prefetchExplicitWebSources(task) {
   const urls = explicitPublicUrls(task); if (!urls.length) return '';
   const reports = [];
   for (const url of urls) {
-    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 6000)}`); }
+    try {
+      log(`Host prefetching explicit public source: ${url}`);
+      const fetched = await webFetch(url);
+      // Raw SPA DOM and minified bundle text belong in task-scoped evidence,
+      // not in a small model's first prompt. Keep only the retrieval facts and
+      // downloaded-file identifiers that the host needs to build its index.
+      const summary = String(fetched).split(/\r?\n/).filter(line => /initial fetch|rendered with|downloaded .* as web-|discovered static resources|^\s*-\s*https?:\/\//i.test(line)).slice(0, 14).join('\n');
+      reports.push(`[Host-fetched source: ${url}]\n${summary || 'Host fetched the public source successfully.'}`);
+    }
     catch (error) { reports.push(`[Host fetch failed: ${url}]\n${error.message}`); }
   }
   return reports.length ? `\n\nThe extension host fetched these public URLs explicitly named by the user before this turn. They are primary task evidence; use them instead of treating search snippets as evidence. Do not claim they were unavailable unless the included host result says so.\n\n${reports.join('\n\n')}` : '';
@@ -804,11 +812,11 @@ function hostSourceResearchIndex(task, prefetchContext) {
   const terms = candidates.filter(term => term === 'lua.' || request.includes(term) || ['firmware', 'serial', 'compile', 'upload'].includes(term)).slice(0, 5);
   const findings = [];
   for (const id of ids) for (const term of terms) {
-    const result = searchDownloadedWebFile(id, term, 3);
-    if (!/^No literal matches/i.test(result)) findings.push(truncate(result, 1400));
+    const result = searchDownloadedWebFile(id, term, 1);
+    if (!/^No literal matches/i.test(result)) findings.push(truncate(result, 700));
   }
   if (!findings.length) return '';
-  return `\n\n[Host-indexed downloaded source evidence]\n${truncate(findings.join('\n\n'), 6500)}`;
+  return `\n\n[Host-indexed downloaded source evidence]\n${truncate(findings.join('\n\n'), 2800)}`;
 }
 function truncate(value, limit = 14000) {
   const text = String(value ?? '');

@@ -142,7 +142,9 @@ test('host task routing keeps a prefetched SPA source focused on its own applica
   assert.match(source, /candidate\.origin === target\.origin && \/\\\/static\\\/js\\\/main/);
   assert.match(source, /activeTaskHasPrefetchedSource = \/read_downloaded_web_file with id/);
   assert.match(source, /if \(phase === 'research'\) \{[\s\S]*activeTaskHasPrefetchedSource\) add\(downloadedEvidence\)/);
-  assert.match(source, /truncate\(await webFetch\(url\), 6000\)/);
+  assert.match(source, /Raw SPA DOM and minified bundle text belong in task-scoped evidence/);
+  assert.match(source, /searchDownloadedWebFile\(id, term, 1\)/);
+  assert.match(source, /truncate\(findings\.join\('\\n\\n'\), 2800\)/);
   assert.match(source, /function hostSourceResearchIndex\(task, prefetchContext\)/);
   assert.match(source, /Host completed the initial source index and advanced the task to analyze/);
   assert.match(source, /const evidenceBudgetExhausted = activePhaseEvidenceActions >= 6/);
