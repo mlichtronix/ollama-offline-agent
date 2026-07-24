@@ -11,7 +11,7 @@ const { ChatStore } = require('./lib/chat-store');
 const { WorkerPool, normalizeWorkers } = require('./lib/worker-pool');
 const { discoverOllamaHosts } = require('./lib/worker-discovery');
 const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
-const { classifyModelMessage } = require('./lib/model-adapter');
+const { classifyModelMessage, isToolProtocolEcho, isToolProtocolPrefix } = require('./lib/model-adapter');
 const { TaskRuntime } = require('./lib/task-runtime');
 const { EvidenceStore } = require('./lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('./lib/tool-broker');
@@ -1270,9 +1270,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
         if (partial.content) {
-          const stream = activeStreams.get(streamId) || { text: '', createdAt: new Date().toISOString() };
+          const stream = activeStreams.get(streamId) || { text: '', sent: 0, createdAt: new Date().toISOString() };
           stream.text += partial.content; activeStreams.set(streamId, stream);
-          postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
+          // Do not flash the model's own tool schema in the user-facing chat.
+          // It remains in memory for classification, but is withheld until it
+          // proves to be ordinary prose rather than an internal protocol echo.
+          if (!isToolProtocolPrefix(stream.text) && !isToolProtocolEcho(stream.text)) {
+            const delta = stream.text.slice(stream.sent);
+            stream.sent = stream.text.length;
+            if (delta) postUi('assistantDelta', { id: streamId, delta, createdAt: stream.createdAt });
+          }
         }
       }, activeTaskTools, masterSession);
       // A stop may arrive while an endpoint is producing its final network
@@ -1352,7 +1359,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           const failures = (failedToolCalls.get(callKey) || 0) + 1;
           failedToolCalls.set(callKey, failures);
           if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(outcome.content, 500)}`);
-        } else failedToolCalls.delete(callKey);
+        } else { failedToolCalls.delete(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; }
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });

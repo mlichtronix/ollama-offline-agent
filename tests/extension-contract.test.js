@@ -6,7 +6,7 @@ const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
-const { classifyModelMessage } = require('../lib/model-adapter');
+const { classifyModelMessage, isToolProtocolPrefix } = require('../lib/model-adapter');
 const { TaskRuntime } = require('../lib/task-runtime');
 const { EvidenceStore } = require('../lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('../lib/tool-broker');
@@ -78,6 +78,9 @@ test('model adapter accepts only native or complete fallback tool calls', () => 
   const unavailable = classifyModelMessage({ tool_calls: [{ function: { name: 'write_file', arguments: { path: 'x.txt', content: 'x' } } }] }, tools);
   assert.equal(unavailable.kind, 'invalid_model_output');
   assert.equal(unavailable.reason, 'unavailable_tool:write_file');
+  assert.equal(isToolProtocolPrefix('<tools>'), true);
+  assert.equal(isToolProtocolPrefix('Tools\n\nYou may call one or more functions.'), true);
+  assert.equal(isToolProtocolPrefix('Tools are available locally.'), false);
   assert.equal(classifyModelMessage({ content: 'Use list_files {"directory":"."} and then explain the result.' }, tools).kind, 'final_answer');
 });
 
@@ -379,7 +382,10 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(modelAdapterSource, /<tool_call>/);
   assert.match(source, /classifyModelMessage/);
   assert.match(source, /Model adapter rejected invalid output/);
+  assert.match(source, /invalidOutputNudges = 0; emptyResponseNudges = 0/);
+  assert.match(source, /Do not flash the model's own tool schema/);
   assert.match(modelAdapterSource, /unavailable_tool:/);
+  assert.match(modelAdapterSource, /function isToolProtocolPrefix/);
   assert.match(source, /name: 'advance_task_phase'/);
   assert.match(source, /name: 'set_task_plan'/);
   assert.match(source, /name: 'declare_verification_blocker'/);
