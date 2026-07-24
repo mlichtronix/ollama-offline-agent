@@ -57,8 +57,9 @@ test('Ollama client bounds tool turns and aborts repeating streamed prose', asyn
   };
   try {
     const client = new OllamaClient({ getEndpoint: () => 'http://127.0.0.1:11434' });
-    await assert.rejects(() => client.chat({ model: 'qwen3:8b', messages: [], tools: [{ function: { name: 'list_files' } }], temperature: 0.2 }), /generation loop detected/i);
+    await assert.rejects(() => client.chat({ model: 'qwen3:8b', messages: [], tools: [{ function: { name: 'list_files' } }], toolChoice: 'required', temperature: 0.2 }), /generation loop detected/i);
     assert.equal(request.options.num_predict, 1600);
+    assert.equal(request.tool_choice, 'required');
   } finally { global.fetch = originalFetch; }
 });
 
@@ -263,6 +264,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function webEnabled\(\) \{ return config\(\)\.get\('webEnabled', true\); \}/);
   assert.match(ollamaClientSource, /num_ctx/);
   assert.match(ollamaClientSource, /num_predict: toolCalling \? 1600 : 4096/);
+  assert.match(ollamaClientSource, /tool_choice: toolChoice/);
   assert.match(ollamaClientSource, /Model generation loop detected/);
   assert.match(ollamaClientSource, /stream: true/);
   assert.match(ollamaClientSource, /format/);

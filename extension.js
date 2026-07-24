@@ -1122,10 +1122,10 @@ function fallbackMasterCandidates(health, { needsVision = false } = {}) {
   return health.filter(worker => worker.status === 'available').filter(worker => !(normalizeEndpoint(worker.endpoint) === primaryEndpoint && worker.model === primaryModel)).filter(worker => !needsVision || (worker.profile?.capabilities || []).map(value => String(value).toLowerCase()).includes('vision')).filter(worker => !requestedContext || !worker.profile?.contextLength || Number(worker.profile.contextLength) >= requestedContext).sort((left, right) => workerSpeed(right) - workerSpeed(left) || left.name.localeCompare(right.name));
 }
 function masterRuntimeForWorker(worker) { return { client: workerPool.client(worker), model: worker.model, name: worker.name, endpoint: worker.endpoint, contextWindow: Number(config().get('contextWindow', 0)) }; }
-async function chatWithMasterFailover(messages, onChunk, taskTools, session) {
+async function chatWithMasterFailover(messages, onChunk, taskTools, session, toolChoice) {
   let streamedContent = '';
   for (;;) {
-    try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current); }
+    try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current, toolChoice); }
     catch (error) {
       if (!isEndpointLimitError(error) || !session.fallbacks.length) throw error;
       session.limitedKeys.add(masterRuntimeKey(session.current));
@@ -1138,11 +1138,11 @@ async function chatWithMasterFailover(messages, onChunk, taskTools, session) {
     }
   }
 }
-async function chat(messages, onChunk, taskTools = tools, runtime = {}) {
+async function chat(messages, onChunk, taskTools = tools, runtime = {}, toolChoice) {
   const controller = createActiveAbortController();
   try {
     return await (runtime.client || ollama).chat({
-      model: runtime.model || config().get('model'), messages, tools: taskTools,
+      model: runtime.model || config().get('model'), messages, tools: taskTools, toolChoice,
       temperature: Number(config().get('temperature', 0.2)),
       contextWindow: Number(runtime.contextWindow ?? config().get('contextWindow', 0)),
       signal: controller.signal, onChunk,
@@ -1283,6 +1283,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       if (visiblePhase !== completedLookupPhase) { completedLookupCalls.clear(); completedLookupPhase = visiblePhase; }
       activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
+      const requireToolAction = requiresPlan && !['review', 'complete'].includes(activeTaskRuntime?.activePhase() || 'work');
       const data = await chatWithMasterFailover(messages, partial => {
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
@@ -1292,13 +1293,13 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           // Do not flash the model's own tool schema in the user-facing chat.
           // It remains in memory for classification, but is withheld until it
           // proves to be ordinary prose rather than an internal protocol echo.
-          if (!isToolProtocolPrefix(stream.text) && !isToolProtocolEcho(stream.text)) {
+          if (!requireToolAction && !isToolProtocolPrefix(stream.text) && !isToolProtocolEcho(stream.text)) {
             const delta = stream.text.slice(stream.sent);
             stream.sent = stream.text.length;
             if (delta) postUi('assistantDelta', { id: streamId, delta, createdAt: stream.createdAt });
           }
         }
-      }, activeTaskTools, masterSession);
+      }, activeTaskTools, masterSession, requireToolAction ? 'required' : undefined);
       // A stop may arrive while an endpoint is producing its final network
       // chunk. Do not turn that late chunk into a persisted answer.
       throwIfCancelled();
