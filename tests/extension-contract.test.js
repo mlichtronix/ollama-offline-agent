@@ -256,6 +256,13 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /function isToolCatalogueEcho/);
   assert.match(source, /Tool-catalogue recovery guard/);
   assert.match(source, /restricted the next turn to list_files/);
+  assert.match(source, /function normalizeWorkspaceAlias/);
+  assert.match(source, /\^\\\/workspace\(\?:\\\/\|\$\)/);
+  assert.match(source, /function normalizeToolArguments/);
+  assert.match(source, /function isRepetitiveProgressEcho/);
+  assert.match(source, /Repetitive-response recovery guard/);
+  assert.match(source, /Agent repeated the same failing/);
+  assert.match(source, /throwIfCancelled\(\);/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
   assert.match(browserSource, /function createFilteringProxy/);
   assert.match(browserSource, /async function publicAddress/);

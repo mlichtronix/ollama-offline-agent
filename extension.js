@@ -352,6 +352,26 @@ function resolveTarget(input) {
   if (realProbe !== realBase && !realProbe.startsWith(realPrefix)) throw new Error('Path resolves outside the workspace through a symlink.');
   return candidate;
 }
+// Local coding models are frequently trained against container examples and
+// therefore emit `/workspace` even when the extension host is Windows. This is
+// not an arbitrary absolute-path escape: it is a well-known placeholder for
+// the *currently open* project. Resolve only that exact alias before the
+// guardrail sees it; all other Unix-style paths remain rejected on Windows.
+function normalizeWorkspaceAlias(value) {
+  const raw = String(value ?? '').trim();
+  if (process.platform !== 'win32' || !/^\/workspace(?:\/|$)/i.test(raw)) return raw;
+  const relative = raw.slice('/workspace'.length).replace(/^\/+/, '');
+  const normalized = relative ? relative.replace(/\//g, path.sep) : '.';
+  log(`Normalized model workspace alias ${raw} to ${normalized}.`);
+  return normalized;
+}
+function normalizeToolArguments(name, input) {
+  const args = { ...(input || {}) };
+  if (['list_files', 'search_text'].includes(name) && args.directory !== undefined) args.directory = normalizeWorkspaceAlias(args.directory);
+  if (['read_file', 'share_file_excerpt', 'write_file', 'delete_file'].includes(name) && args.path !== undefined) args.path = normalizeWorkspaceAlias(args.path);
+  if (name === 'run_command' && args.cwd !== undefined) args.cwd = normalizeWorkspaceAlias(args.cwd);
+  return args;
+}
 function isAgentInternal(target) { const workspace = root(); return Boolean(workspace) && (target === path.join(workspace, '.ollama-agent') || target.startsWith(path.join(workspace, '.ollama-agent') + path.sep)); }
 function isSensitiveTarget(target) { const name = path.basename(target).toLowerCase(); return /^(\.env(?:\..*)?|id_(rsa|ed25519|ecdsa)|known_hosts|authorized_keys|credentials(?:\.json)?|.*\.(pem|pfx|p12|key))$/.test(name); }
 function matchesProtected(target) {
@@ -924,6 +944,7 @@ async function executeTool(call) {
   let args;
   try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; }
   catch { return 'Invalid tool arguments JSON.'; }
+  args = normalizeToolArguments(call.function.name, args);
   try {
     if (activeTaskUi?.mode === 'plan' && new Set(['write_file', 'delete_file', 'rollback_last_change', 'run_command', 'save_skill']).has(call.function.name)) return 'Plan mode is read-only. Describe this action in the plan instead of executing it.';
     if (call.function.name === 'search_chat_history') return searchChatHistory(args.query, args.maxResults);
@@ -1145,6 +1166,12 @@ function isToolCatalogueEcho(value) {
   const parameterMentions = (text.match(/\b(?:tool|function|parameters?)\b/gi) || []).length;
   return toolMentions >= 6 && parameterMentions >= 6;
 }
+function isRepetitiveProgressEcho(value) {
+  const paragraphs = String(value || '').replace(/\r/g, '').split(/\n\s*\n/).map(part => part.replace(/\s+/g, ' ').trim().toLowerCase()).filter(part => part.length >= 48);
+  const counts = new Map();
+  for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) || 0) + 1);
+  return [...counts.values()].some(count => count >= 3);
+}
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
@@ -1232,6 +1259,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let recoveryNudges = 0;
   let emptyResponseNudges = 0;
   let toolCatalogueNudges = 0;
+  let repetitiveResponseNudges = 0;
+  const failedToolCalls = new Map();
   let activeTaskTools = taskTools;
   let promptRead = false;
   try {
@@ -1249,6 +1278,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
         }
       }, activeTaskTools, masterSession);
+      // A stop may arrive while an endpoint is producing its final network
+      // chunk. Do not turn that late chunk into a persisted answer.
+      throwIfCancelled();
       if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
@@ -1277,6 +1309,14 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           updateTaskUi('continue', 'active', 'Model echoed tool descriptions; requesting one concrete workspace inspection.');
           continue;
         }
+        if (isRepetitiveProgressEcho(response) && repetitiveResponseNudges < 1) {
+          repetitiveResponseNudges++;
+          messages.pop(); activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
+          messages.push({ role: 'user', content: 'Your last response repeated the same progress text and did not report a completed action or blocker. Do not repeat a plan. Continue from the latest successful tool result, make one concrete next tool call, or give a concise blocker grounded in that result.' });
+          log('Repetitive-response recovery guard: discarded repeated progress prose and requested one concrete continuation.');
+          updateTaskUi('continue', 'active', 'Model repeated progress prose; requesting a concrete continuation.');
+          continue;
+        }
         if (failingTest && recoveryNudges < 2) {
           recoveryNudges++;
           activeStreams.delete(streamId);
@@ -1293,6 +1333,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       for (const call of calls) {
         if (cancelled) break;
         const result = await executeTool(call);
+        const callKey = `${call.function.name}\n${String(call.function.arguments || '')}`;
+        if (/^Tool error:/i.test(String(result))) {
+          const failures = (failedToolCalls.get(callKey) || 0) + 1;
+          failedToolCalls.set(callKey, failures);
+          if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(result, 500)}`);
+        } else failedToolCalls.delete(callKey);
         if (isTestCommand(call)) failingTest = testFailed(result) ? result : '';
         log(`${call.function.name}: ${truncate(result, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
