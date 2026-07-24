@@ -1364,7 +1364,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           const failures = (failedToolCalls.get(callKey) || 0) + 1;
           failedToolCalls.set(callKey, failures);
           if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(outcome.content, 500)}`);
-        } else { failedToolCalls.delete(callKey); if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; }
+        } else { failedToolCalls.delete(callKey); if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0; }
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });

@@ -389,7 +389,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(modelAdapterSource, /<tool_call>/);
   assert.match(source, /classifyModelMessage/);
   assert.match(source, /Model adapter rejected invalid output/);
-  assert.match(source, /invalidOutputNudges = 0; emptyResponseNudges = 0/);
+  assert.match(source, /invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0/);
   assert.match(source, /Do not flash the model's own tool schema/);
   assert.match(modelAdapterSource, /unavailable_tool:/);
   assert.match(modelAdapterSource, /function isToolProtocolPrefix/);
