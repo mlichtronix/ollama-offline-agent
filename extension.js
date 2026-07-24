@@ -14,6 +14,7 @@ const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
 const { classifyModelMessage } = require('./lib/model-adapter');
 const { TaskRuntime } = require('./lib/task-runtime');
 const { EvidenceStore } = require('./lib/evidence-store');
+const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('./lib/tool-broker');
 
 let cancelled = false;
 let running = false;
@@ -942,7 +943,7 @@ async function filesRecursive(dir, base, result) {
     if (result.length >= 500) return;
   }
 }
-async function executeTool(call) {
+async function executeToolRaw(call) {
   let args;
   try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments || '{}') : call.function.arguments || {}; }
   catch { return 'Invalid tool arguments JSON.'; }
@@ -1028,9 +1029,17 @@ async function executeTool(call) {
     return `Unknown tool: ${call.function.name}`;
   } catch (error) { return `Tool error: ${error.message}`; }
 }
+async function executeTool(call, availableTools = tools) {
+  const prepared = prepareToolCall(call, availableTools);
+  if (!prepared.ok) return serializeToolResult(toolResult(prepared));
+  const raw = await executeToolRaw(prepared.call);
+  const outcome = toolResult(prepared, raw);
+  if (outcome.ok) updateTaskUi(outcome.phase, 'active', `${outcome.tool} completed.`);
+  return serializeToolResult(outcome);
+}
 async function executeWorkerTool(call) {
-  if (!workerToolNames.has(call?.function?.name)) return `Blocked: ${call?.function?.name || 'unknown'} is not available to read-only workers.`;
-  return executeTool(call);
+  if (!workerToolNames.has(call?.function?.name)) return serializeToolResult({ ok: false, tool: call?.function?.name || '', kind: 'blocked', phase: 'work', content: `Blocked: ${call?.function?.name || 'unknown'} is not available to read-only workers.` });
+  return executeTool(call, workerTools);
 }
 function runCommand(command, requestedCwd) {
   const configuredTimeout = config().get('commandTimeoutSeconds', 0);
@@ -1272,15 +1281,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       updateTaskUi('tools', 'active', calls.map(c => c.function.name).join(', ')); log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
       for (const call of calls) {
         if (cancelled) break;
-        const result = await executeTool(call);
+        const result = await executeTool(call, activeTaskTools);
+        const outcome = parseToolResult(result);
         const callKey = `${call.function.name}\n${String(call.function.arguments || '')}`;
-        if (/^Tool error:/i.test(String(result))) {
+        if (!outcome.ok && outcome.kind === 'error') {
           const failures = (failedToolCalls.get(callKey) || 0) + 1;
           failedToolCalls.set(callKey, failures);
-          if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(result, 500)}`);
+          if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(outcome.content, 500)}`);
         } else failedToolCalls.delete(callKey);
-        if (isTestCommand(call)) failingTest = testFailed(result) ? result : '';
-        log(`${call.function.name}: ${truncate(result, 1200)}`);
+        if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
+        log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
         if (pendingSteering) break;
       }

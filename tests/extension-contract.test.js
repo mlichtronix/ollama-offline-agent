@@ -9,6 +9,7 @@ const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairRea
 const { classifyModelMessage } = require('../lib/model-adapter');
 const { TaskRuntime } = require('../lib/task-runtime');
 const { EvidenceStore } = require('../lib/evidence-store');
+const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('../lib/tool-broker');
 const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
@@ -17,6 +18,7 @@ const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'work
 const modelAdapterSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'model-adapter.js'), 'utf8');
 const taskRuntimeSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'task-runtime.js'), 'utf8');
 const evidenceStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'evidence-store.js'), 'utf8');
+const toolBrokerSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tool-broker.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
@@ -77,6 +79,18 @@ test('evidence store cites only deliberate host evidence, not browser telemetry'
   assert.deepEqual(evidence.sources().map(item => item.url), ['https://dev.example.test/', 'https://dev.example.test/static/app.js']);
   assert.equal(evidence.getDownload('web-1').name, 'app.js');
   assert.equal(evidenceStoreSource.includes('separate from browser telemetry'), true);
+});
+
+test('tool broker validates task-visible calls and serializes structured results', () => {
+  const tools = [{ function: { name: 'list_files' } }];
+  const allowed = prepareToolCall({ function: { name: 'list_files', arguments: '{"directory":"."}' } }, tools);
+  assert.equal(allowed.ok, true);
+  assert.equal(allowed.phase, 'work');
+  const blocked = prepareToolCall({ function: { name: 'write_file', arguments: '{}' } }, tools);
+  assert.deepEqual(blocked, { ok: false, tool: 'write_file', kind: 'blocked', content: 'Tool write_file is not available in the current task state.' });
+  const result = parseToolResult(serializeToolResult(toolResult(allowed, 'one.txt')));
+  assert.deepEqual(result, { ok: true, tool: 'list_files', kind: 'success', phase: 'work', content: 'one.txt' });
+  assert.equal(toolBrokerSource.includes('untrusted model response'), true);
 });
 
 test('worker preflight requires the configured model on its endpoint', () => {
