@@ -724,7 +724,7 @@ async function prefetchExplicitWebSources(task) {
   const urls = explicitPublicUrls(task); if (!urls.length) return '';
   const reports = [];
   for (const url of urls) {
-    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 18000)}`); }
+    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 6000)}`); }
     catch (error) { reports.push(`[Host fetch failed: ${url}]\n${error.message}`); }
   }
   return reports.length ? `\n\nThe extension host fetched these public URLs explicitly named by the user before this turn. They are primary task evidence; use them instead of treating search snippets as evidence. Do not claim they were unavailable unless the included host result says so.\n\n${reports.join('\n\n')}` : '';
@@ -795,6 +795,20 @@ function searchDownloadedWebFile(id, query, maxResults) {
   const content = item.data.toString('utf8'); const limit = Math.max(1, Math.min(30, Number(maxResults) || 12)); const matches = []; let offset = 0;
   while (matches.length < limit) { const found = content.indexOf(needle, offset); if (found < 0) break; const before = Math.max(0, found - 180); const after = Math.min(content.length, found + needle.length + 360); matches.push(`offset ${found}: ${content.slice(before, after).replace(/\s+/g, ' ')}`); offset = found + Math.max(1, needle.length); }
   return matches.length ? `Matches in ${item.name} (${item.url}):\n` + matches.join('\n\n') : `No literal matches for ${JSON.stringify(needle)} in ${item.name}.`;
+}
+function hostSourceResearchIndex(task, prefetchContext) {
+  const ids = [...new Set([...String(prefetchContext || '').matchAll(/read_downloaded_web_file with id "(web-[^"]+)"/gi)].map(match => match[1]))].slice(0, 2);
+  if (!ids.length) return '';
+  const request = String(task || '').toLowerCase();
+  const candidates = ['lua.', 'firmware', 'serial', 'compile', 'upload', 'deploy', 'bootloader'];
+  const terms = candidates.filter(term => term === 'lua.' || request.includes(term) || ['firmware', 'serial', 'compile', 'upload'].includes(term)).slice(0, 5);
+  const findings = [];
+  for (const id of ids) for (const term of terms) {
+    const result = searchDownloadedWebFile(id, term, 3);
+    if (!/^No literal matches/i.test(result)) findings.push(truncate(result, 1400));
+  }
+  if (!findings.length) return '';
+  return `\n\n[Host-indexed downloaded source evidence]\n${truncate(findings.join('\n\n'), 6500)}`;
 }
 function truncate(value, limit = 14000) {
   const text = String(value ?? '');
@@ -1236,8 +1250,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const images = resources.filter(item => item.mime.startsWith('image/')).map(item => item.data);
   if (images.length) userMessage.images = images;
   await configuredModel();
-  const explicitWebContext = !continuationMessages ? await prefetchExplicitWebSources(task) : '';
+  let explicitWebContext = !continuationMessages ? await prefetchExplicitWebSources(task) : '';
   activeTaskHasPrefetchedSource = /read_downloaded_web_file with id "web-/i.test(explicitWebContext);
+  if (activeTaskHasPrefetchedSource) explicitWebContext += hostSourceResearchIndex(task, explicitWebContext);
   let workerContext = ''; const masterSession = { current: {}, fallbacks: [], limitedKeys: new Set() };
   const directAgentQuestion = isDirectAgentQuestion(taskWithResources);
   if (configuredWorkers().some(worker => worker.enabled)) {
@@ -1291,6 +1306,13 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
     activeTaskUi = planned.ui;
     postUi('taskUi', activeTaskUi);
     log(`Host initialized an ordered ${activeTaskUi.plan.length}-step task plan.`);
+    if (activeTaskHasPrefetchedSource && activeTaskRuntime.activePhase() === 'research') {
+      const advanced = activeTaskRuntime.advance('analyze', 'Host indexed the explicitly supplied public source.');
+      if (advanced.ok) {
+        activeTaskUi = advanced.ui; postUi('taskUi', activeTaskUi);
+        log('Host completed the initial source index and advanced the task to analyze.');
+      }
+    }
   }
   const phaseInstruction = requiresPlan ? `\n\nCurrent host phase: ${activeTaskRuntime.activePhase()}. The host has already created the plan. Perform one relevant visible tool action now; do not write a final answer in this phase.` : '';
   const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + phaseInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + explicitWebContext + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
