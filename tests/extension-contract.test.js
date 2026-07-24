@@ -373,6 +373,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /requiresPlan = taskMode === 'execute'/);
   assert.match(source, /toolsForTaskPhase\(taskTools, requiresPlan\)/);
   assert.match(source, /activeTaskRuntime\?\.activePhase\(\) \|\| 'work', 'active', calls/);
+  assert.match(source, /activeTaskRuntime\?\.activePhase\(\) \|\| 'analyze', 'active', 'Model output was invalid/);
+  assert.doesNotMatch(source, /updateTaskUi\('continue', 'active', 'Model output was invalid/);
   assert.match(source, /function toolsForTaskPhase/);
   assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools, requiresPlan\)/);
   assert.match(taskRuntimeSource, /const phaseTransitions/);

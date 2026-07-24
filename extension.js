@@ -1132,7 +1132,7 @@ async function chatWithMasterFailover(messages, onChunk, taskTools, session) {
       const worker = session.fallbacks.shift(); session.current = masterRuntimeForWorker(worker);
       const speed = workerSpeed(worker); const speedText = speed ? ` at ${speed} tok/s` : '';
       log(`Master endpoint limit detected (${error.message}). Continuing on worker ${worker.name} (${worker.model})${speedText}.`);
-      updateTaskUi('continue', 'active', `Master limit reached; continuing on ${worker.name}.`);
+      updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', `Master limit reached; continuing on ${worker.name}.`);
       streamedContent = '';
     }
   }
@@ -1292,7 +1292,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
             invalidOutputNudges++;
             messages.push({ role: 'user', content: requiresPlan && !(activeTaskRuntime?.ui.plan || []).length ? 'This execute task must begin with one native set_task_plan call. Do not write the plan as chat text: submit concise ordered steps through that tool.' : `The last model output was rejected by the runtime (${classified.reason}). Do not repeat internal tool instructions, XML, JSON schemas, or a plan. Make one valid native tool call, or provide a concise final answer based only on completed actions.` });
             log(`Model adapter rejected invalid output: ${classified.reason}. Requesting one concrete continuation.`);
-            updateTaskUi('continue', 'active', 'Model output was invalid; requesting a concrete continuation.');
+            updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model output was invalid; requesting a concrete continuation.');
             continue;
           }
           throw new Error(`Model produced invalid agent output twice (${classified.reason}). Select a model with reliable native tool calling or retry the task.`);
@@ -1304,7 +1304,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
             emptyResponseNudges++;
             messages.push({ role: 'user', content: 'You returned no final answer and made no tool call. Continue the active task now: either call the next necessary tool or provide a concise final answer with the actions actually completed and any blocker.' });
             log('Empty-response recovery guard: asking the agent to continue (1/1).');
-            updateTaskUi('continue', 'active', 'Model returned no answer; requesting a concrete continuation.');
+            updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model returned no answer; requesting a concrete continuation.');
             continue;
           }
           throw new Error('Model returned no final answer after an automatic recovery attempt. Select a more capable model or retry the task.');
