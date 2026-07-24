@@ -75,6 +75,7 @@ test('model adapter accepts only native or complete fallback tool calls', () => 
   const tools = [{ function: { name: 'list_files' } }, { function: { name: 'read_file' } }];
   assert.deepEqual(classifyModelMessage({ tool_calls: [{ function: { name: 'list_files', arguments: { directory: '.' } } }] }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'native' });
   assert.deepEqual(classifyModelMessage({ content: 'list_files {"directory":"."}' }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'plain-fallback' });
+  assert.deepEqual(classifyModelMessage({ content: '{"name":"list_files","arguments":{"directory":"."}}\n{"name":"read_file","arguments":{"path":"README.md"}}' }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }, { function: { name: 'read_file', arguments: '{"path":"README.md"}' } }], source: 'json-fallback' });
   assert.equal(classifyModelMessage({ content: 'For each function call, return a json object with function name and arguments within' }, tools).kind, 'invalid_model_output');
   const unavailable = classifyModelMessage({ tool_calls: [{ function: { name: 'write_file', arguments: { path: 'x.txt', content: 'x' } } }] }, tools);
   assert.equal(unavailable.kind, 'invalid_model_output');
@@ -94,6 +95,7 @@ test('task runtime owns ordered progress and terminal state', () => {
   assert.equal(runtime.activePhase(), 'work');
   assert.equal(runtime.advance('implement', 'Evidence is sufficient.').ok, true);
   assert.equal(runtime.activePhase(), 'implement');
+  assert.equal(runtime.advance('implement').ok, false);
   assert.equal(runtime.advance('research').ok, false);
   runtime.recordFile('src/example.py', { snapshot: 'checkpoint', existed: true }, { added: 3, removed: 1 });
   runtime.recordCheck('python -m pytest', 'passed', true);
@@ -398,6 +400,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /onThinkingDisabledForTools/);
   assert.match(modelAdapterSource, /<tool_call>/);
   assert.match(source, /classifyModelMessage/);
+  assert.match(source, /classified\.source === 'native' \? message : \{ role: 'assistant', content: '', tool_calls: calls \}/);
   assert.match(source, /Model adapter rejected invalid output/);
   assert.match(source, /invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0/);
   assert.match(source, /Do not flash the model's own tool schema/);

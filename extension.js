@@ -1303,7 +1303,10 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const message = data.message;
       const classified = classifyModelMessage(message, activeTaskTools);
       const calls = classified.kind === 'tool_call' ? classified.calls : [];
-      if (classified.kind === 'tool_call') messages.push(message);
+      // Compatibility JSON/XML calls must be represented as native calls in
+      // the next turn. Replaying their raw text trains weaker templates to
+      // keep emitting plain JSON instead of continuing after the tool result.
+      if (classified.kind === 'tool_call') messages.push(classified.source === 'native' ? message : { role: 'assistant', content: '', tool_calls: calls });
       if (!calls.length) {
         const streamedResponse = activeStreams.get(streamId)?.text; const response = String(classified.content || streamedResponse || message.content || '').trim();
         if (classified.kind === 'invalid_model_output') {
