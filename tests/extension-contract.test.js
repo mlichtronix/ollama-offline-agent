@@ -138,6 +138,9 @@ test('host task routing keeps a prefetched SPA source focused on its own applica
   assert.match(source, /activeTaskHasPrefetchedSource = \/read_downloaded_web_file with id/);
   assert.match(source, /if \(phase === 'research'\) \{[\s\S]*activeTaskHasPrefetchedSource\) add\(downloadedEvidence\)/);
   assert.match(source, /truncate\(await webFetch\(url\), 18000\)/);
+  assert.match(source, /const evidenceBudgetExhausted = activePhaseEvidenceActions >= 6/);
+  assert.match(source, /if \(activePhaseEvidenceActions === 0\) visible\.delete\('advance_task_phase'\)/);
+  assert.match(source, /host evidence budget for this phase is complete/);
 });
 
 test('task plans may begin research after initial host analysis activity', () => {

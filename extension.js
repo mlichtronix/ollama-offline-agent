@@ -49,6 +49,7 @@ let activeEvidenceStore = new EvidenceStore();
 // models are materially more reliable when they choose between two evidence
 // tools than when they receive every file, browser, Git, and task tool at once.
 let activeTaskHasPrefetchedSource = false;
+let activePhaseEvidenceActions = 0;
 const workerBenchmarks = new Map();
 let activeTaskUi;
 let activeTaskRuntime;
@@ -957,13 +958,24 @@ function toolsForTaskPhase(candidates, requirePlan = false) {
   const add = names => names.forEach(name => visible.add(name));
   const workspaceEvidence = ['list_files', 'read_file', 'search_text', 'share_file_excerpt'];
   const downloadedEvidence = ['read_downloaded_web_file', 'search_downloaded_web_file'];
+  // A minified bundle can contain thousands of plausible strings.  Searching
+  // it indefinitely is not analysis.  After a small, host-enforced evidence
+  // budget the only valid action is to advance and reason from what was found.
+  const evidenceBudgetExhausted = activePhaseEvidenceActions >= 6;
   if (phase === 'research') {
     // An explicitly named web source was already fetched by the host.  Start
     // by inspecting that evidence rather than making a weak model rediscover
     // the Web, chat history, and filesystem in a single turn.
-    if (activeTaskHasPrefetchedSource) add(downloadedEvidence);
-    else add(['web_search', 'web_fetch', 'web_download', 'list_browsers', 'browser_open']);
-  } else if (phase === 'analyze') add([...workspaceEvidence, ...downloadedEvidence]);
+    if (!evidenceBudgetExhausted) {
+      if (activeTaskHasPrefetchedSource) add(downloadedEvidence);
+      else add(['web_search', 'web_fetch', 'web_download', 'list_browsers', 'browser_open']);
+    }
+    // Require one actual inspection even when the host has pre-fetched a URL;
+    // this prevents a weak model from immediately attempting to skip research.
+    if (activePhaseEvidenceActions === 0) visible.delete('advance_task_phase');
+  } else if (phase === 'analyze') {
+    if (!evidenceBudgetExhausted) add([...workspaceEvidence, ...downloadedEvidence]);
+  }
   else if (phase === 'work') add([...workspaceEvidence, ...downloadedEvidence]);
   else if (phase === 'implement') add([...workspaceEvidence, ...downloadedEvidence, ...implementationToolNames]);
   else if (phase === 'verify') add([...workspaceEvidence, ...verificationToolNames]);
@@ -1192,6 +1204,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeEvidenceStore = new EvidenceStore();
   activeTaskHasPrefetchedSource = false;
+  activePhaseEvidenceActions = 0;
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   if (isFilesystemRoot(root())) return vscode.window.showErrorMessage(`Open the project folder itself before running the agent. The current workspace is the filesystem root (${root()}), which is intentionally not allowed for agent tasks.`);
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
@@ -1303,7 +1316,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       }
       else updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', `Continuing agent work (step ${step}).`);
       const visiblePhase = activeTaskRuntime?.activePhase() || 'work';
-      if (visiblePhase !== completedLookupPhase) { completedLookupCalls.clear(); completedLookupPhase = visiblePhase; }
+      if (visiblePhase !== completedLookupPhase) { completedLookupCalls.clear(); completedLookupPhase = visiblePhase; activePhaseEvidenceActions = 0; }
       activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
       const requireToolAction = requiresPlan && !['review', 'complete'].includes(activeTaskRuntime?.activePhase() || 'work');
@@ -1406,11 +1419,18 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           const failures = (failedToolCalls.get(callKey) || 0) + 1;
           failedToolCalls.set(callKey, failures);
           if (failures >= 2) throw new Error(`Agent repeated the same failing ${call.function.name} call twice without making progress. Last result: ${truncate(outcome.content, 500)}`);
-        } else { failedToolCalls.delete(callKey); if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey); invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0; }
+        } else {
+          failedToolCalls.delete(callKey);
+          if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey);
+          if (new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'list_browsers', 'browser_open', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']).has(call.function.name)) activePhaseEvidenceActions++;
+          if (call.function.name === 'advance_task_phase') activePhaseEvidenceActions = 0;
+          invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0;
+        }
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
         if (outcome.ok && call.function.name === 'advance_task_phase') messages.push({ role: 'user', content: `The host is now in ${activeTaskRuntime?.activePhase() || 'work'}. Perform the next concrete action using a visible tool; do not answer yet while the plan has pending steps.` });
+        if (outcome.ok && activePhaseEvidenceActions === 6 && ['research', 'analyze'].includes(activeTaskRuntime?.activePhase() || '')) messages.push({ role: 'user', content: 'The host evidence budget for this phase is complete. Use the evidence already returned and advance to the next planned phase; do not continue searching the same source with synonyms.' });
         if (!outcome.ok && call.function.name === 'set_task_plan') messages.push({ role: 'user', content: 'Correct the plan rather than repeating it unchanged. A plan starts from Understand and may use Research → Analyze → Work → Implement → Verify → Review. Submit only `steps`, each with a concise `title` and one `phase`.' });
         if (!outcome.ok && call.function.name === 'advance_task_phase') messages.push({ role: 'user', content: 'Follow the accepted plan in order. Advance only to the next pending phase named by the host error; do not skip a planned step.' });
         if (repeatedLookup) messages.push({ role: 'user', content: 'Do not repeat the same successful web lookup in this phase. Use the already returned result, choose a different targeted URL/query, inspect a downloaded file, or advance to the next planned phase.' });
