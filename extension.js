@@ -12,6 +12,7 @@ const { WorkerPool, normalizeWorkers } = require('./lib/worker-pool');
 const { discoverOllamaHosts } = require('./lib/worker-discovery');
 const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
 const { classifyModelMessage } = require('./lib/model-adapter');
+const { TaskRuntime } = require('./lib/task-runtime');
 
 let cancelled = false;
 let running = false;
@@ -42,6 +43,7 @@ let activeWebSources = [];
 let activeWebDownloads = new Map();
 const workerBenchmarks = new Map();
 let activeTaskUi;
+let activeTaskRuntime;
 let workerDiscoveryController;
 // A webview can be recreated while its secondary-sidebar tab is hidden. Keep
 // partial replies in the extension host so a replacement webview can restore
@@ -161,27 +163,13 @@ function setPromptState(id, state) {
   postUi('promptState', { id: String(id), state });
 }
 function updateTaskUi(phase, status = 'active', detail = '') {
-  if (!activeTaskUi) return;
-  if (status === 'active') {
-    for (const previous of activeTaskUi.timeline) {
-      if (previous.phase !== phase && previous.status === 'active') previous.status = 'complete';
-    }
-  }
-  const existing = activeTaskUi.timeline.find(item => item.phase === phase);
-  const item = existing || { phase, status, detail };
-  item.status = status; if (detail) item.detail = detail;
-  if (!existing) activeTaskUi.timeline.push(item);
-  if (detail) {
-    activeTaskUi.activity ||= [];
-    const previous = activeTaskUi.activity.at(-1);
-    if (!previous || previous.phase !== phase || previous.status !== status || previous.detail !== detail) activeTaskUi.activity.push({ phase, status, detail, at: new Date().toISOString() });
-    if (activeTaskUi.activity.length > 30) activeTaskUi.activity.splice(0, activeTaskUi.activity.length - 30);
-  }
+  if (!activeTaskRuntime) return;
+  activeTaskUi = activeTaskRuntime.transition(phase, status, detail);
   postUi('taskUi', activeTaskUi);
 }
 function updateTaskWorkers(active, total = active) {
-  if (!activeTaskUi) return;
-  activeTaskUi.workers = { active: Math.max(0, Number(active) || 0), total: Math.max(0, Number(total) || 0) };
+  if (!activeTaskRuntime) return;
+  activeTaskUi = activeTaskRuntime.setWorkers(active, total);
   postUi('taskUi', activeTaskUi);
 }
 function diffLineStats(before, after) {
@@ -206,15 +194,12 @@ function diffLineStats(before, after) {
   return { added: Math.max(0, newEnd - start + 1), removed: Math.max(0, oldEnd - start + 1) };
 }
 function recordTaskFile(file, checkpoint, stats, state = {}) {
-  if (!activeTaskUi) return;
-  const existing = activeTaskUi.files.find(item => item.path === file);
-  if (existing) Object.assign(existing, { ...stats, ...state });
-  else activeTaskUi.files.push({ path: file, snapshot: checkpoint.snapshot, existed: checkpoint.existed, ...stats, ...state });
-  activeTaskUi.canRestore ||= Boolean(checkpoint); postUi('taskUi', activeTaskUi);
+  if (!activeTaskRuntime) return;
+  activeTaskUi = activeTaskRuntime.recordFile(file, checkpoint, stats, state); postUi('taskUi', activeTaskUi);
 }
 function recordTaskCheck(command, result) {
-  if (!activeTaskUi) return;
-  activeTaskUi.checks.push({ command: truncate(command, 180), passed: !testFailed(result), result: truncate(result, 600) }); postUi('taskUi', activeTaskUi);
+  if (!activeTaskRuntime) return;
+  activeTaskUi = activeTaskRuntime.recordCheck(truncate(command, 180), truncate(result, 600), !testFailed(result)); postUi('taskUi', activeTaskUi);
 }
 function createActiveAbortController() { const controller = new AbortController(); activeAbortControllers.add(controller); return controller; }
 function releaseActiveAbortController(controller) { activeAbortControllers.delete(controller); }
@@ -1127,8 +1112,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   await ensureWorkspaceState();
   const replacedBranch = !continuationMessages && editId ? replaceChatBranch(String(editId)) : false;
   const taskMode = ['ask', 'plan', 'execute'].includes(requestedMode) ? requestedMode : 'execute';
-  activeTaskUi = { mode: taskMode, state: 'running', startedAt: new Date().toISOString(), timeline: [], activity: [], workers: { active: 0, total: 0 }, files: [], checks: [], canRestore: false };
-  running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
+  activeTaskRuntime = new TaskRuntime({ mode: taskMode });
+  activeTaskUi = activeTaskRuntime.ui;
+  running = true; cancelled = false; if (!continuationMessages) approvedCommands.clear(); postUi('runState', { working: true }); updateTaskUi('prepare', 'complete', 'Task runtime initialized.'); updateTaskUi('understand', 'active', taskMode === 'plan' ? 'Researching and preparing a read-only plan.' : taskMode === 'ask' ? 'Inspecting the question and relevant context.' : 'Inspecting the request and relevant context.'); output.show(true); log(`\n=== ${continuationMessages ? 'Steering' : taskMode}: ${task} ===`);
   const mode = config().get('accessMode');
   const access = mode === 'fullSystem' ? 'Full system mode is enabled: safe commands and local installers run without repeated prompts. Create, edit, and delete operations for non-sensitive files physically inside the open workspace run autonomously with rollback checkpoints. Writes outside the workspace, sensitive files, restores, and playbook saves still require approval; destructive system commands remain blocked.' : guardedSystem() ? 'Guarded system mode is enabled: absolute paths are allowed when needed.' : 'Workspace mode is enabled: all file operations remain inside the open workspace.';
   const lastAssistant = latestAssistantContext(); const lastUser = latestUserContext();
@@ -1264,7 +1250,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           continue;
         }
         messages.push(message);
-        const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
+        const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi = activeTaskRuntime.finish('complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });
@@ -1289,12 +1275,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
-  } catch (error) { if (cancelled && error.name === 'AbortError') { updateTaskUi('complete', 'stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { updateTaskUi('complete', 'failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) { activeTaskUi.state = cancelled ? 'stopped' : 'failed'; activeTaskUi.finishedAt ||= new Date().toISOString(); postUi('taskUi', activeTaskUi); } }
+  } catch (error) { if (cancelled && error.name === 'AbortError') { activeTaskUi = activeTaskRuntime?.finish('stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { activeTaskUi = activeTaskRuntime?.finish('failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) postUi('taskUi', activeTaskUi); }
   finally {
     const steering = pendingSteering; pendingSteering = undefined;
     const continuation = activeAgentMessages ? [...activeAgentMessages] : undefined;
     for (const [id, stream] of activeStreams) { if (steering && stream.text) continuation?.push({ role: 'assistant', content: stream.text }); if (steering) postUi('assistantClear', { id }); }
-    activeStreams.clear(); activeAgentMessages = undefined; if (activeTaskUi?.state === 'running') { activeTaskUi.state = cancelled ? 'stopped' : 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi('complete', cancelled ? 'stopped' : 'complete', cancelled ? 'Stopped by user.' : 'Finished.'); postUi('taskUi', activeTaskUi); } running = false; postUi('runState', { working: false });
+    activeStreams.clear(); activeAgentMessages = undefined; if (activeTaskUi?.state === 'running') { activeTaskUi = activeTaskRuntime?.finish(cancelled ? 'stopped' : 'complete', cancelled ? 'Stopped by user.' : 'Finished.'); postUi('taskUi', activeTaskUi); } running = false; postUi('runState', { working: false });
     if (steering) await ask(steering.text, steering.id, steering.attachments, steering.replyTo, continuation, steering.mode);
     else if (queuedAgentRequests.length) { const next = queuedAgentRequests.shift(); await ask(next.text, next.id, next.attachments, next.replyTo, undefined, next.mode); }
   }
@@ -1385,7 +1371,7 @@ async function newChat() {
   if (running) return vscode.window.showWarningMessage('Stop the current agent run before starting a new chat.');
   const confirmed = await vscode.window.showWarningMessage('Clear this workspace chat history? This removes the visible conversation and its local context.', { modal: true }, 'Clear Chat History');
   if (confirmed !== 'Clear Chat History') return;
-  await chatStore.clear(); pendingResources.length = 0; promptStates.clear(); activeTaskUi = undefined;
+  await chatStore.clear(); pendingResources.length = 0; promptStates.clear(); activeTaskRuntime = undefined; activeTaskUi = undefined;
   postUi('historyCleared');
 }
 function openChatEditor() { chatProvider.openInEditor(); }

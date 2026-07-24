@@ -7,12 +7,14 @@ const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/oll
 const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
 const { classifyModelMessage } = require('../lib/model-adapter');
+const { TaskRuntime } = require('../lib/task-runtime');
 const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
 const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
 const modelAdapterSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'model-adapter.js'), 'utf8');
+const taskRuntimeSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'task-runtime.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
@@ -48,6 +50,20 @@ test('model adapter accepts only native or complete fallback tool calls', () => 
   assert.deepEqual(classifyModelMessage({ content: 'list_files {"directory":"."}' }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'plain-fallback' });
   assert.equal(classifyModelMessage({ content: 'For each function call, return a json object with function name and arguments within' }, tools).kind, 'invalid_model_output');
   assert.equal(classifyModelMessage({ content: 'Use list_files {"directory":"."} and then explain the result.' }, tools).kind, 'final_answer');
+});
+
+test('task runtime owns ordered progress and terminal state', () => {
+  const runtime = new TaskRuntime({ mode: 'execute', startedAt: '2026-07-24T10:00:00.000Z' });
+  runtime.transition('understand', 'active', 'Inspecting request.');
+  runtime.transition('tools', 'active', 'Reading files.');
+  assert.deepEqual(runtime.ui.timeline.map(item => [item.phase, item.status]), [['understand', 'complete'], ['work', 'active']]);
+  runtime.recordFile('src/example.py', { snapshot: 'checkpoint', existed: true }, { added: 3, removed: 1 });
+  runtime.recordCheck('python -m pytest', 'passed', true);
+  runtime.finish('complete', 'Verified.');
+  assert.equal(runtime.ui.state, 'complete');
+  assert.equal(runtime.ui.files[0].added, 3);
+  assert.equal(runtime.ui.checks[0].passed, true);
+  assert.equal(runtime.ui.finishedAt !== undefined, true);
 });
 
 test('worker preflight requires the configured model on its endpoint', () => {
@@ -224,7 +240,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(workerPoolSource, /requires: Array\.isArray\(item\.requires\)/);
   assert.match(source, /const activeAbortControllers = new Set\(\)/);
   assert.match(source, /Stop requested: aborting active Ollama and worker requests/);
-  assert.match(source, /startedAt: new Date\(\)\.toISOString\(\)/);
+  assert.match(taskRuntimeSource, /startedAt = new Date\(\)\.toISOString\(\)/);
   assert.match(chatSource, /function formatTaskDuration\(/);
   assert.match(source, /function exportChatPdf\(/);
   assert.match(source, /--print-to-pdf=/);
@@ -310,7 +326,8 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(source, /Plan mode is read-only/);
   assert.match(source, /const taskTools = taskMode === 'execute'/);
   assert.match(source, /function updateTaskUi/);
-  assert.match(source, /activeTaskUi\.activity/);
+  assert.match(taskRuntimeSource, /this\.ui\.activity/);
+  assert.match(source, /new TaskRuntime/);
   assert.match(source, /function updateTaskWorkers/);
   assert.match(source, /updateTaskWorkers\(assignments\.length/);
   assert.match(source, /recordTaskFile/);

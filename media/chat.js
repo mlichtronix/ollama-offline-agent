@@ -65,7 +65,7 @@ function syncTaskTimer() { clearInterval(taskTimer); refreshTaskDuration(); if (
 function renderTaskUi() {
   if (!taskUi?.timeline?.length) { clearInterval(taskTimer); taskPanel.hidden = true; return; }
   taskPanel.hidden = false;
-  const labels = { understand: 'Understand', analyze: 'Analyze', research: 'Research', tools: 'Work', implement: 'Implement', verify: 'Verify', continue: 'Continue', plan: 'Plan ready', complete: 'Complete' };
+  const labels = { prepare: 'Prepare', understand: 'Understand', analyze: 'Analyze', research: 'Research', work: 'Work', tools: 'Work', implement: 'Implement', verify: 'Verify', review: 'Review', continue: 'Continue', plan: 'Plan ready', complete: 'Complete' };
   const files = taskUi.files || []; const checks = taskUi.checks || []; const activity = taskUi.activity || [];
   const hasReview = files.length || checks.length || taskUi.canRestore;
   const added = files.reduce((total, file) => total + Number(file.added || 0), 0); const removed = files.reduce((total, file) => total + Number(file.removed || 0), 0);
