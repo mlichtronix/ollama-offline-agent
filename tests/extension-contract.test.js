@@ -8,6 +8,7 @@ const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
 const { classifyModelMessage } = require('../lib/model-adapter');
 const { TaskRuntime } = require('../lib/task-runtime');
+const { EvidenceStore } = require('../lib/evidence-store');
 const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
@@ -15,6 +16,7 @@ const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ol
 const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
 const modelAdapterSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'model-adapter.js'), 'utf8');
 const taskRuntimeSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'task-runtime.js'), 'utf8');
+const evidenceStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'evidence-store.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
@@ -64,6 +66,17 @@ test('task runtime owns ordered progress and terminal state', () => {
   assert.equal(runtime.ui.files[0].added, 3);
   assert.equal(runtime.ui.checks[0].passed, true);
   assert.equal(runtime.ui.finishedAt !== undefined, true);
+});
+
+test('evidence store cites only deliberate host evidence, not browser telemetry', () => {
+  const evidence = new EvidenceStore();
+  const page = evidence.record('browser_open', 'https://dev.example.test/', 'Example IDE');
+  evidence.record('web_download', 'https://dev.example.test/static/app.js', 'app.js');
+  evidence.recordDownload({ id: 'web-1', url: 'https://dev.example.test/static/app.js', name: 'app.js', data: Buffer.from('source'), text: true });
+  assert.equal(page.isNewSource, true);
+  assert.deepEqual(evidence.sources().map(item => item.url), ['https://dev.example.test/', 'https://dev.example.test/static/app.js']);
+  assert.equal(evidence.getDownload('web-1').name, 'app.js');
+  assert.equal(evidenceStoreSource.includes('separate from browser telemetry'), true);
 });
 
 test('worker preflight requires the configured model on its endpoint', () => {
@@ -292,8 +305,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(browserSource, /async function publicAddress/);
   assert.match(browserSource, /--proxy-server=http:\/\/127\.0\.0\.1/);
   assert.match(browserSource, /Private browser destination is blocked/);
-  assert.match(source, /activeWebDownloads = new Map\(\)/);
-  assert.match(source, /const body = await fetchPublicWeb\(target\); const staticText = webText\(body\); await rememberWebSource\(target, target\.hostname\)/);
+  assert.match(source, /activeEvidenceStore = new EvidenceStore\(\)/);
+  assert.match(source, /await rememberWebEvidence\(target, target\.hostname, 'web_fetch'\)/);
+  assert.doesNotMatch(source, /for \(const observed of sources\.slice/);
   assert.match(source, /const rendered = await browserOpen\(target\.toString\(\), 'chrome', 8000\)/);
   assert.match(source, /vendor blog supports its own claims but not universal protocol semantics/i);
   assert.match(source, /Present REST\/GraphQL-style tradeoffs as conditional analysis/i);

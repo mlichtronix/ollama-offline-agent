@@ -13,6 +13,7 @@ const { discoverOllamaHosts } = require('./lib/worker-discovery');
 const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
 const { classifyModelMessage } = require('./lib/model-adapter');
 const { TaskRuntime } = require('./lib/task-runtime');
+const { EvidenceStore } = require('./lib/evidence-store');
 
 let cancelled = false;
 let running = false;
@@ -36,11 +37,10 @@ let pendingSteering;
 let activeAgentMessages;
 const queuedAgentRequests = [];
 const promptStates = new Map();
-let activeWebSources = [];
-// Downloaded web assets are task-scoped, in-memory research material. They
-// are deliberately never written into the user's workspace by a read-only
-// worker, and are discarded before the next task starts.
-let activeWebDownloads = new Map();
+// Evidence is task-scoped and intentionally separate from passive browser
+// telemetry. Only host-requested fetch/download/render actions may become
+// citations in an assistant response.
+let activeEvidenceStore = new EvidenceStore();
 const workerBenchmarks = new Map();
 let activeTaskUi;
 let activeTaskRuntime;
@@ -213,7 +213,7 @@ function postChat(kind, text, display = true, id = messageId(), attachments = []
   if (display) postUi('message', event);
 }
 function rememberUser(contextText, visibleText = contextText, alreadyVisible = false, id, attachments = [], replyTo) { const event = chatStore.rememberUser(contextText, visibleText, id, attachments, replyTo); if (!alreadyVisible) postUi('message', event); return event; }
-function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt, activeWebSources); postUi('message', event); }
+function rememberAssistant(text, id = messageId(), createdAt) { const event = chatStore.rememberAssistant(text, id, createdAt, activeEvidenceStore.sources()); postUi('message', event); }
 function deleteChatMessage(id) {
   if (chatStore.remove(id)) postUi('messageDeleted', { id });
 }
@@ -660,7 +660,23 @@ async function planWorkerAssignments(task, workers, lastAssistant, lastUser, max
 }
 async function fetchPublicWeb(url, limit = 180000) { const target = safeWebUrl(url); const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000); try { const response = await fetch(target, { signal: controller.signal, redirect: 'error', headers: { Accept: 'text/html,text/plain;q=0.9', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const text = await response.text(); return truncate(text, limit); } finally { clearTimeout(timer); } }
 function webText(html) { return String(html).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim(); }
-async function rememberWebSource(url, title) { try { const target = safeWebUrl(url); const existing = activeWebSources.find(item => item.url === target.toString()); if (existing) return existing; const source = { title: title || target.hostname, url: target.toString(), favicon: '' }; activeWebSources.push(source); try { const response = await fetch(new URL('/favicon.ico', target), { redirect: 'error', headers: { Accept: 'image/*', 'User-Agent': 'Ollama-Offline-Agent/1.0' } }); const data = Buffer.from(await response.arrayBuffer()); const type = response.headers.get('content-type') || 'image/x-icon'; if (response.ok && data.length && data.length <= 64 * 1024 && /^image\//i.test(type)) source.favicon = `data:${type};base64,${data.toString('base64')}`; } catch {} return source; } catch { return undefined; } }
+async function rememberWebEvidence(url, title, kind) {
+  try {
+    const target = safeWebUrl(url);
+    const recorded = activeEvidenceStore.record(kind, target.toString(), title || target.hostname);
+    if (!recorded) return undefined;
+    // Favicon retrieval is presentation-only. It never creates a source by
+    // itself and failures do not affect the evidence record.
+    if (recorded.isNewSource) {
+      try {
+        const response = await fetch(new URL('/favicon.ico', target), { redirect: 'error', headers: { Accept: 'image/*', 'User-Agent': 'Ollama-Offline-Agent/1.0' } });
+        const data = Buffer.from(await response.arrayBuffer()); const type = response.headers.get('content-type') || 'image/x-icon';
+        if (response.ok && data.length && data.length <= 64 * 1024 && /^image\//i.test(type)) activeEvidenceStore.setFavicon(target.toString(), `data:${type};base64,${data.toString('base64')}`);
+      } catch {}
+    }
+    return recorded.source;
+  } catch { return undefined; }
+}
 async function webSearch(query, limit) { if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.'; const text = String(query || '').trim(); if (!text) return 'Provide a search query.'; const address = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(text)}`; const html = await fetchPublicWeb(address); const results = []; const pattern = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a|class="result__snippet"[^>]*>([\s\S]*?)<\/div/gi; let match; while ((match = pattern.exec(html)) && results.length < Math.max(1, Math.min(10, Number(limit) || 5))) { const href = match[1]; const title = webText(match[2]); const snippet = webText(match[3] || match[4] || ''); if (href && title) results.push(`${title}\n${href}\n${snippet}`); } return results.length ? results.join('\n\n') : 'No search results were parsed.'; }
 function browserStaticResources(html, base) {
   const resources = []; const pattern = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi; let match;
@@ -671,7 +687,7 @@ function browserStaticResources(html, base) {
 }
 async function webFetch(url) {
   if (!webEnabled()) return 'Web access is disabled. The user can enable it with the Globe button.';
-  const target = safeWebUrl(url); const body = await fetchPublicWeb(target); const staticText = webText(body); await rememberWebSource(target, target.hostname);
+  const target = safeWebUrl(url); const body = await fetchPublicWeb(target); const staticText = webText(body); await rememberWebEvidence(target, target.hostname, 'web_fetch');
   if (!/\b(?:you need to enable javascript|enable javascript to run|javascript is required)\b/i.test(staticText)) return truncate(staticText, 14000);
   // This branch is host-managed so a model cannot abandon JavaScript research
   // merely because the initial lightweight fetch returned an SPA shell.
@@ -717,8 +733,8 @@ async function webDownload(url, requestedMaxBytes) {
     if (data.length > maxBytes) throw new Error(`download is ${data.length} bytes, above the ${maxBytes}-byte task limit`);
     const name = downloadedWebFileName(target, response); const contentType = String(response.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim(); const id = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const text = downloadedWebFileIsText(name, contentType);
-    activeWebDownloads.set(id, { id, url: target.toString(), name, contentType, data, text });
-    await rememberWebSource(target, name);
+    activeEvidenceStore.recordDownload({ id, url: target.toString(), name, contentType, data, text });
+    await rememberWebEvidence(target, name, 'web_download');
     return `Downloaded ${name} as ${id} (${data.length} bytes, ${contentType}). ${text ? `Use read_downloaded_web_file with id "${id}" to inspect it.` : 'This is a binary asset; it is retained only as task-scoped evidence and cannot be executed or written by a worker.'}`;
   } finally { clearTimeout(timer); }
 }
@@ -737,8 +753,8 @@ async function browserOpen(url, browserId, waitMs) {
     try {
       const page = await renderPage(browser, target.toString(), waitMs); const dom = webText(page.html);
       if (!dom) { attempts.push(`${browser.name}: empty rendered DOM`); continue; }
-      const resources = browserStaticResources(page.html, target); const sources = [...new Set([...page.observedUrls, ...resources])];
-      await rememberWebSource(target, target.hostname); for (const observed of sources.slice(0, 40)) await rememberWebSource(observed, new URL(observed).hostname);
+      const resources = browserStaticResources(page.html, target);
+      await rememberWebEvidence(target, target.hostname, 'browser_open');
       const fallback = preferred && preferred.id !== browser.id ? ` ${preferred.name} produced no usable DOM, so the host retried with ${browser.name}.` : '';
       const resourceList = resources.length ? `\n\nDiscovered static resources (download these when relevant):\n${resources.map(item => `- ${item}`).join('\n')}` : '';
       return `Rendered with ${browser.name}.${fallback} Observed ${page.observedUrls.length} public network destination(s).${resourceList}\n\n${truncate(dom, 50000)}`;
@@ -747,7 +763,7 @@ async function browserOpen(url, browserId, waitMs) {
   return `Tool error: no installed headless browser produced a usable DOM for ${target}. Attempts: ${attempts.join('; ')}. This does not prove that the website is unavailable; use web_download to inspect its static assets or retry a compatible browser.`;
 }
 function readDownloadedWebFile(id, startLine, endLine, pattern, flags, startOffset, endOffset) {
-  const item = activeWebDownloads.get(String(id || ''));
+  const item = activeEvidenceStore.getDownload(String(id || ''));
   if (!item) return 'No downloaded web file with that id exists in this task.';
   if (!item.text) return `Downloaded file ${item.name} is binary (${item.contentType}, ${item.data.length} bytes) and has no safe text preview.`;
   const content = item.data.toString('utf8');
@@ -758,7 +774,7 @@ function readDownloadedWebFile(id, startLine, endLine, pattern, flags, startOffs
   return `Downloaded web file: ${item.name} (${item.url})\n` + readFileContent(content, startLine, endLine, pattern, flags);
 }
 function searchDownloadedWebFile(id, query, maxResults) {
-  const item = activeWebDownloads.get(String(id || '')); const needle = String(query || '');
+  const item = activeEvidenceStore.getDownload(String(id || '')); const needle = String(query || '');
   if (!item) return 'No downloaded web file with that id exists in this task.';
   if (!item.text) return `Downloaded file ${item.name} is binary and cannot be searched as text.`;
   if (!needle) return 'Provide a non-empty literal search query.';
@@ -1103,8 +1119,7 @@ function isDirectAgentQuestion(task) {
 }
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
-  activeWebSources = [];
-  activeWebDownloads = new Map();
+  activeEvidenceStore = new EvidenceStore();
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   if (isFilesystemRoot(root())) return vscode.window.showErrorMessage(`Open the project folder itself before running the agent. The current workspace is the filesystem root (${root()}), which is intentionally not allowed for agent tasks.`);
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
