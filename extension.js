@@ -13,6 +13,7 @@ const { discoverOllamaHosts } = require('./lib/worker-discovery');
 const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
 const { classifyModelMessage, isToolProtocolEcho, isToolProtocolPrefix } = require('./lib/model-adapter');
 const { TaskRuntime } = require('./lib/task-runtime');
+const { bootstrapTaskPlan } = require('./lib/host-task-planner');
 const { EvidenceStore } = require('./lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('./lib/tool-broker');
 const { verifyCompletion } = require('./lib/completion-verifier');
@@ -936,7 +937,10 @@ const reviewToolNames = new Set(['git_status', 'git_diff', 'git_log', 'rollback_
 function toolsForTaskPhase(candidates, requirePlan = false) {
   if (requirePlan && !(activeTaskRuntime?.ui.plan || []).length) return candidates.filter(tool => tool.function.name === 'set_task_plan');
   const phase = activeTaskRuntime?.activePhase() || 'understand';
-  const visible = new Set([...evidenceToolNames, 'set_task_plan', 'advance_task_phase']);
+  // Once the host owns an accepted plan, do not keep its administrative
+  // planning tool in the model schema. It cannot help execution and makes
+  // weaker tool templates needlessly likely to echo protocol text.
+  const visible = new Set([...evidenceToolNames, 'advance_task_phase']);
   if (phase === 'implement') for (const name of implementationToolNames) visible.add(name);
   if (phase === 'verify') for (const name of verificationToolNames) visible.add(name);
   if (phase === 'review') for (const name of reviewToolNames) visible.add(name);
@@ -1256,6 +1260,13 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let completedLookupPhase = '';
   const idempotentLookupTools = new Set(['web_search', 'web_fetch', 'web_download', 'browser_open', 'list_browsers']);
   const requiresPlan = taskMode === 'execute' && !directAgentQuestion;
+  if (requiresPlan) {
+    const planned = activeTaskRuntime.setPlan(bootstrapTaskPlan({ task: taskWithResources, hasPublicSource: Boolean(explicitWebContext) }));
+    if (!planned.ok) throw new Error(`Host could not initialize the task plan: ${planned.message}`);
+    activeTaskUi = planned.ui;
+    postUi('taskUi', activeTaskUi);
+    log(`Host initialized an ordered ${activeTaskUi.plan.length}-step task plan.`);
+  }
   let activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
   let promptRead = false;
   try {

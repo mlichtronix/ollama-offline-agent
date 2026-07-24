@@ -8,6 +8,7 @@ const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
 const { classifyModelMessage, isToolProtocolPrefix } = require('../lib/model-adapter');
 const { TaskRuntime } = require('../lib/task-runtime');
+const { bootstrapTaskPlan } = require('../lib/host-task-planner');
 const { EvidenceStore } = require('../lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('../lib/tool-broker');
 const { verifyCompletion } = require('../lib/completion-verifier');
@@ -118,6 +119,15 @@ test('task runtime accepts only an ordered, phase-valid plan', () => {
   runtime.advance('implement');
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'active', 'pending', 'pending']);
   assert.equal(runtime.setPlan([{ phase: 'work', title: 'Skip required research and analysis.' }]).ok, false);
+});
+
+test('host bootstrap plans remove administrative planning from the first model turn', () => {
+  const plan = bootstrapTaskPlan({ task: 'Download a public URL, document it, and implement a Python library.', hasPublicSource: true });
+  assert.deepEqual(plan.map(step => step.phase), ['research', 'analyze', 'work', 'implement', 'verify', 'review']);
+  const runtime = new TaskRuntime({ mode: 'execute' });
+  runtime.transition('understand', 'active');
+  assert.equal(runtime.setPlan(plan).ok, true);
+  assert.equal(runtime.activePhase(), 'research');
 });
 
 test('task plans may begin research after initial host analysis activity', () => {
