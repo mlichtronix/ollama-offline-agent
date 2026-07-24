@@ -53,6 +53,9 @@ test('model adapter accepts only native or complete fallback tool calls', () => 
   assert.deepEqual(classifyModelMessage({ tool_calls: [{ function: { name: 'list_files', arguments: { directory: '.' } } }] }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'native' });
   assert.deepEqual(classifyModelMessage({ content: 'list_files {"directory":"."}' }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'plain-fallback' });
   assert.equal(classifyModelMessage({ content: 'For each function call, return a json object with function name and arguments within' }, tools).kind, 'invalid_model_output');
+  const unavailable = classifyModelMessage({ tool_calls: [{ function: { name: 'write_file', arguments: { path: 'x.txt', content: 'x' } } }] }, tools);
+  assert.equal(unavailable.kind, 'invalid_model_output');
+  assert.equal(unavailable.reason, 'unavailable_tool:write_file');
   assert.equal(classifyModelMessage({ content: 'Use list_files {"directory":"."} and then explain the result.' }, tools).kind, 'final_answer');
 });
 
@@ -61,6 +64,10 @@ test('task runtime owns ordered progress and terminal state', () => {
   runtime.transition('understand', 'active', 'Inspecting request.');
   runtime.transition('tools', 'active', 'Reading files.');
   assert.deepEqual(runtime.ui.timeline.map(item => [item.phase, item.status]), [['understand', 'complete'], ['work', 'active']]);
+  assert.equal(runtime.activePhase(), 'work');
+  assert.equal(runtime.advance('implement', 'Evidence is sufficient.').ok, true);
+  assert.equal(runtime.activePhase(), 'implement');
+  assert.equal(runtime.advance('research').ok, false);
   runtime.recordFile('src/example.py', { snapshot: 'checkpoint', existed: true }, { added: 3, removed: 1 });
   runtime.recordCheck('python -m pytest', 'passed', true);
   runtime.finish('complete', 'Verified.');
@@ -308,6 +315,11 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(modelAdapterSource, /<tool_call>/);
   assert.match(source, /classifyModelMessage/);
   assert.match(source, /Model adapter rejected invalid output/);
+  assert.match(modelAdapterSource, /unavailable_tool:/);
+  assert.match(source, /name: 'advance_task_phase'/);
+  assert.match(source, /function toolsForTaskPhase/);
+  assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools\)/);
+  assert.match(taskRuntimeSource, /const phaseTransitions/);
   assert.match(source, /function normalizeWorkspaceAlias/);
   assert.match(source, /\^\\\/workspace\(\?:\\\/\|\$\)/);
   assert.match(source, /function normalizeToolArguments/);
