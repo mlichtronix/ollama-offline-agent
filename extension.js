@@ -44,6 +44,11 @@ const promptStates = new Map();
 // telemetry. Only host-requested fetch/download/render actions may become
 // citations in an assistant response.
 let activeEvidenceStore = new EvidenceStore();
+// The host knows whether it has already supplied a downloaded public source
+// for this task.  Keep the first research turn deliberately narrow: local
+// models are materially more reliable when they choose between two evidence
+// tools than when they receive every file, browser, Git, and task tool at once.
+let activeTaskHasPrefetchedSource = false;
 const workerBenchmarks = new Map();
 let activeTaskUi;
 let activeTaskRuntime;
@@ -696,7 +701,15 @@ async function webFetch(url) {
   // merely because the initial lightweight fetch returned an SPA shell.
   const rendered = await browserOpen(target.toString(), 'chrome', 8000);
   if (/^Tool error:/i.test(rendered)) return `The initial fetch returned a JavaScript-required shell. Automatic browser rendering also failed:\n${rendered}`;
-  const bundle = rendered.match(/^\s*-\s+(https?:\/\/[^\s]+\.(?:[cm]?js)(?:\?[^\s]*)?)\s*$/im)?.[1]; let download = '';
+  // A SPA may load helper libraries before its own application bundle. Prefer
+  // a same-origin main bundle; otherwise an unrelated helper such as tmbus
+  // becomes the only source the model inspects.
+  const resources = [...String(rendered).matchAll(/^\s*-\s+(https?:\/\/[^\s]+\.js(?:\?[^\s]*)?)\s*$/gim)].map(match => match[1]);
+  const bundle = resources.find(item => {
+    try { const candidate = new URL(item); return candidate.origin === target.origin && /\/static\/js\/main(?:\.|-).*\.js$/i.test(candidate.pathname); } catch { return false; }
+  }) || resources.find(item => {
+    try { return new URL(item).origin === target.origin; } catch { return false; }
+  }) || resources[0]; let download = '';
   if (bundle) { try { download = '\n\nThe extension also downloaded the primary JavaScript bundle for source inspection:\n' + await webDownload(bundle); } catch (error) { download = `\n\nAutomatic primary-bundle download failed: ${error.message}`; } }
   return `The initial fetch returned a JavaScript-required shell. The extension automatically rendered it with the controlled browser; use the rendered DOM and discovered resources below, then inspect relevant source bundles with web_download and search_downloaded_web_file.${download}\n\n${rendered}`;
 }
@@ -710,7 +723,7 @@ async function prefetchExplicitWebSources(task) {
   const urls = explicitPublicUrls(task); if (!urls.length) return '';
   const reports = [];
   for (const url of urls) {
-    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 60000)}`); }
+    try { log(`Host prefetching explicit public source: ${url}`); reports.push(`[Host-fetched source: ${url}]\n${truncate(await webFetch(url), 18000)}`); }
     catch (error) { reports.push(`[Host fetch failed: ${url}]\n${error.message}`); }
   }
   return reports.length ? `\n\nThe extension host fetched these public URLs explicitly named by the user before this turn. They are primary task evidence; use them instead of treating search snippets as evidence. Do not claim they were unavailable unless the included host result says so.\n\n${reports.join('\n\n')}` : '';
@@ -940,13 +953,21 @@ function toolsForTaskPhase(candidates, requirePlan = false) {
   // Once the host owns an accepted plan, do not keep its administrative
   // planning tool in the model schema. It cannot help execution and makes
   // weaker tool templates needlessly likely to echo protocol text.
-  const visible = new Set([...evidenceToolNames, 'advance_task_phase']);
-  if (phase === 'implement') for (const name of implementationToolNames) visible.add(name);
-  if (phase === 'verify') for (const name of verificationToolNames) visible.add(name);
-  if (phase === 'review') for (const name of reviewToolNames) visible.add(name);
-  // Work is intentionally broad: it is the controlled escape hatch for a
-  // task that needs to alternate evidence, edits, and checks in one subtask.
-  if (phase === 'work') for (const tool of candidates) visible.add(tool.function.name);
+  const visible = new Set(['advance_task_phase']);
+  const add = names => names.forEach(name => visible.add(name));
+  const workspaceEvidence = ['list_files', 'read_file', 'search_text', 'share_file_excerpt'];
+  const downloadedEvidence = ['read_downloaded_web_file', 'search_downloaded_web_file'];
+  if (phase === 'research') {
+    // An explicitly named web source was already fetched by the host.  Start
+    // by inspecting that evidence rather than making a weak model rediscover
+    // the Web, chat history, and filesystem in a single turn.
+    if (activeTaskHasPrefetchedSource) add(downloadedEvidence);
+    else add(['web_search', 'web_fetch', 'web_download', 'list_browsers', 'browser_open']);
+  } else if (phase === 'analyze') add([...workspaceEvidence, ...downloadedEvidence]);
+  else if (phase === 'work') add([...workspaceEvidence, ...downloadedEvidence]);
+  else if (phase === 'implement') add([...workspaceEvidence, ...downloadedEvidence, ...implementationToolNames]);
+  else if (phase === 'verify') add([...workspaceEvidence, ...verificationToolNames]);
+  else if (phase === 'review') add([...workspaceEvidence, ...reviewToolNames]);
   return candidates.filter(tool => visible.has(tool.function.name));
 }
 
@@ -1170,6 +1191,7 @@ function isDirectAgentQuestion(task) {
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeEvidenceStore = new EvidenceStore();
+  activeTaskHasPrefetchedSource = false;
   if (!root()) return vscode.window.showErrorMessage('Open a folder workspace first.');
   if (isFilesystemRoot(root())) return vscode.window.showErrorMessage(`Open the project folder itself before running the agent. The current workspace is the filesystem root (${root()}), which is intentionally not allowed for agent tasks.`);
   const task = initialTask || await vscode.window.showInputBox({ prompt: 'What should the offline coding agent do?', placeHolder: 'Example: Find why the tests fail and fix them.' });
@@ -1202,6 +1224,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   if (images.length) userMessage.images = images;
   await configuredModel();
   const explicitWebContext = !continuationMessages ? await prefetchExplicitWebSources(task) : '';
+  activeTaskHasPrefetchedSource = /read_downloaded_web_file with id "web-/i.test(explicitWebContext);
   let workerContext = ''; const masterSession = { current: {}, fallbacks: [], limitedKeys: new Set() };
   const directAgentQuestion = isDirectAgentQuestion(taskWithResources);
   if (configuredWorkers().some(worker => worker.enabled)) {

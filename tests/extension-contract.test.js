@@ -133,6 +133,13 @@ test('host bootstrap plans remove administrative planning from the first model t
   assert.equal(runtime.activePhase(), 'research');
 });
 
+test('host task routing keeps a prefetched SPA source focused on its own application bundle', () => {
+  assert.match(source, /candidate\.origin === target\.origin && \/\\\/static\\\/js\\\/main/);
+  assert.match(source, /activeTaskHasPrefetchedSource = \/read_downloaded_web_file with id/);
+  assert.match(source, /if \(phase === 'research'\) \{[\s\S]*activeTaskHasPrefetchedSource\) add\(downloadedEvidence\)/);
+  assert.match(source, /truncate\(await webFetch\(url\), 18000\)/);
+});
+
 test('task plans may begin research after initial host analysis activity', () => {
   const runtime = new TaskRuntime({ mode: 'execute' });
   runtime.transition('understand', 'active');
