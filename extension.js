@@ -936,7 +936,8 @@ const evidenceToolNames = new Set(['search_chat_history', 'read_chat_messages', 
 const implementationToolNames = new Set(['write_file', 'delete_file', 'save_skill']);
 const verificationToolNames = new Set(['run_command', 'declare_verification_blocker']);
 const reviewToolNames = new Set(['git_status', 'git_diff', 'git_log', 'rollback_last_change']);
-function toolsForTaskPhase(candidates) {
+function toolsForTaskPhase(candidates, requirePlan = false) {
+  if (requirePlan && !(activeTaskRuntime?.ui.plan || []).length) return candidates.filter(tool => tool.function.name === 'set_task_plan');
   const phase = activeTaskRuntime?.activePhase() || 'understand';
   const visible = new Set([...evidenceToolNames, 'set_task_plan', 'advance_task_phase']);
   if (phase === 'implement') for (const name of implementationToolNames) visible.add(name);
@@ -1254,7 +1255,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let invalidOutputNudges = 0;
   let completionVerifierNudges = 0;
   const failedToolCalls = new Map();
-  let activeTaskTools = toolsForTaskPhase(taskTools);
+  const requiresPlan = taskMode === 'execute' && !directAgentQuestion;
+  let activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
   let promptRead = false;
   try {
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
@@ -1262,7 +1264,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       const streamId = messageId(); let thinkingStarted = false;
       if (step === 1) updateTaskUi('analyze', 'active', 'Analyzing evidence and choosing the next action.');
       else updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', `Continuing agent work (step ${step}).`);
-      activeTaskTools = toolsForTaskPhase(taskTools);
+      activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
       const data = await chatWithMasterFailover(messages, partial => {
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
@@ -1288,7 +1290,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
           if (invalidOutputNudges < 1) {
             invalidOutputNudges++;
-            messages.push({ role: 'user', content: `The last model output was rejected by the runtime (${classified.reason}). Do not repeat internal tool instructions, XML, JSON schemas, or a plan. Make one valid native tool call, or provide a concise final answer based only on completed actions.` });
+            messages.push({ role: 'user', content: requiresPlan && !(activeTaskRuntime?.ui.plan || []).length ? 'This execute task must begin with one native set_task_plan call. Do not write the plan as chat text: submit concise ordered steps through that tool.' : `The last model output was rejected by the runtime (${classified.reason}). Do not repeat internal tool instructions, XML, JSON schemas, or a plan. Make one valid native tool call, or provide a concise final answer based only on completed actions.` });
             log(`Model adapter rejected invalid output: ${classified.reason}. Requesting one concrete continuation.`);
             updateTaskUi('continue', 'active', 'Model output was invalid; requesting a concrete continuation.');
             continue;
@@ -1315,13 +1317,15 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const completion = verifyCompletion(activeTaskRuntime?.ui);
+        const completion = verifyCompletion(activeTaskRuntime?.ui, { requirePlan: requiresPlan });
         if (!completion.ok) {
           activeStreams.delete(streamId);
           postUi('assistantClear', { id: streamId });
           if (completionVerifierNudges < 1) {
             completionVerifierNudges++;
-            const guidance = completion.reason === 'missing_validation'
+            const guidance = completion.reason === 'missing_plan'
+              ? 'Submit the concise ordered plan through the native set_task_plan tool; do not write the plan as ordinary chat text.'
+              : completion.reason === 'missing_validation'
               ? 'Advance to verify and run a proportionate local validation command. If that is concretely impossible after trying, call declare_verification_blocker with the actual limitation.'
               : completion.reason === 'failed_checks'
                 ? 'Diagnose and correct the failed validation, then rerun it. If a concrete blocker prevents completion, state that blocker with the failed result.'
@@ -1338,7 +1342,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       }
       activeStreams.delete(streamId);
       postUi('assistantClear', { id: streamId });
-      updateTaskUi('tools', 'active', calls.map(c => c.function.name).join(', ')); log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
+      updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', calls.map(c => c.function.name).join(', ')); log(`Step ${step}: ${calls.map(c => c.function.name).join(', ')}`);
       for (const call of calls) {
         if (cancelled) break;
         const result = await executeTool(call, activeTaskTools);
@@ -1357,7 +1361,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);
-  } catch (error) { if (cancelled && error.name === 'AbortError') { activeTaskUi = activeTaskRuntime?.finish('stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { activeTaskUi = activeTaskRuntime?.finish('failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) postUi('taskUi', activeTaskUi); }
+  } catch (error) { for (const id of activeStreams.keys()) postUi('assistantClear', { id }); activeStreams.clear(); if (cancelled && error.name === 'AbortError') { activeTaskUi = activeTaskRuntime?.finish('stopped', 'Stopped by user.'); log('Agent generation aborted by user.'); } else { activeTaskUi = activeTaskRuntime?.finish('failed', error.message); log(`ERROR: ${error.stack || error.message}`); rememberAssistant(`Error: ${error.message}`); vscode.window.showErrorMessage(`Ollama agent failed: ${error.message}`); } if (activeTaskUi) postUi('taskUi', activeTaskUi); }
   finally {
     const steering = pendingSteering; pendingSteering = undefined;
     const continuation = activeAgentMessages ? [...activeAgentMessages] : undefined;

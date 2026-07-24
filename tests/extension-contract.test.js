@@ -41,6 +41,26 @@ test('Ollama client normalizes endpoints and sends scoped bearer authorization',
   }
 });
 
+test('Ollama client bounds tool turns and aborts repeating streamed prose', async () => {
+  const originalFetch = global.fetch;
+  let request;
+  const encoder = new TextEncoder();
+  global.fetch = async (_url, init) => {
+    request = JSON.parse(init.body);
+    const body = new ReadableStream({ start(controller) {
+      controller.enqueue(encoder.encode(`${JSON.stringify({ message: { content: 'x'.repeat(800) } })}\n`));
+      controller.enqueue(encoder.encode(`${JSON.stringify({ message: { content: 'x'.repeat(800) } })}\n`));
+      controller.close();
+    } });
+    return { ok: true, body };
+  };
+  try {
+    const client = new OllamaClient({ getEndpoint: () => 'http://127.0.0.1:11434' });
+    await assert.rejects(() => client.chat({ model: 'qwen3:8b', messages: [], tools: [{ function: { name: 'list_files' } }], temperature: 0.2 }), /generation loop detected/i);
+    assert.equal(request.options.num_predict, 1600);
+  } finally { global.fetch = originalFetch; }
+});
+
 test('worker definitions accept only complete HTTP read-only endpoints', () => {
   const workers = normalizeWorkers([
     { id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434/', model: 'qwen3:8b' },
@@ -210,6 +230,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(packageJson, /"ollamaOffline\.webEnabled"[^\n]+"default": true/);
   assert.match(source, /function webEnabled\(\) \{ return config\(\)\.get\('webEnabled', true\); \}/);
   assert.match(ollamaClientSource, /num_ctx/);
+  assert.match(ollamaClientSource, /num_predict: toolCalling \? 1600 : 4096/);
+  assert.match(ollamaClientSource, /Model generation loop detected/);
   assert.match(ollamaClientSource, /stream: true/);
   assert.match(ollamaClientSource, /format/);
   assert.match(workerPoolSource, /format: 'json'/);
@@ -347,9 +369,12 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /name: 'advance_task_phase'/);
   assert.match(source, /name: 'set_task_plan'/);
   assert.match(source, /name: 'declare_verification_blocker'/);
-  assert.match(source, /verifyCompletion\(activeTaskRuntime\?\.ui\)/);
+  assert.match(source, /verifyCompletion\(activeTaskRuntime\?\.ui, \{ requirePlan: requiresPlan \}\)/);
+  assert.match(source, /requiresPlan = taskMode === 'execute'/);
+  assert.match(source, /toolsForTaskPhase\(taskTools, requiresPlan\)/);
+  assert.match(source, /activeTaskRuntime\?\.activePhase\(\) \|\| 'work', 'active', calls/);
   assert.match(source, /function toolsForTaskPhase/);
-  assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools\)/);
+  assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools, requiresPlan\)/);
   assert.match(taskRuntimeSource, /const phaseTransitions/);
   assert.match(taskRuntimeSource, /setPlan\(steps\)/);
   assert.match(source, /function normalizeWorkspaceAlias/);
