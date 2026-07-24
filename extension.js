@@ -992,8 +992,18 @@ function toolsForTaskPhase(candidates, requirePlan = false) {
   }
   else if (phase === 'work') add([...workspaceEvidence, ...downloadedEvidence]);
   else if (phase === 'implement') add([...workspaceEvidence, ...downloadedEvidence, ...implementationToolNames]);
-  else if (phase === 'verify') add([...workspaceEvidence, ...verificationToolNames]);
-  else if (phase === 'review') add([...workspaceEvidence, ...reviewToolNames]);
+  else if (phase === 'verify') {
+    // Once files changed, validation must be an observable command result or
+    // an explicit blocker. Do not let a read/search substitute for a test.
+    add([...verificationToolNames]);
+    if (!(activeTaskRuntime?.ui.checks || []).length && !activeTaskRuntime?.ui.verification?.blocker) visible.delete('advance_task_phase');
+  }
+  else if (phase === 'review') {
+    add(reviewToolNames);
+    // Review is terminal from the model's perspective. It can report or use
+    // Git inspection, but cannot bounce itself back into prior phases.
+    visible.delete('advance_task_phase');
+  }
   return candidates.filter(tool => visible.has(tool.function.name));
 }
 
@@ -1409,12 +1419,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           postUi('assistantClear', { id: streamId });
           if (completionVerifierNudges < 1) {
             completionVerifierNudges++;
+            if (['missing_validation', 'failed_checks'].includes(completion.reason) && completion.phase) {
+              const reopened = activeTaskRuntime?.reopen(completion.phase, completion.reason === 'missing_validation' ? 'Host reopened verification: a validation result is required.' : 'Host reopened implementation: a verification check failed.');
+              if (reopened?.ok) { activeTaskUi = reopened.ui; postUi('taskUi', activeTaskUi); }
+            }
             const guidance = completion.reason === 'missing_plan'
               ? 'Submit the concise ordered plan through the native set_task_plan tool; do not write the plan as ordinary chat text.'
               : completion.reason === 'missing_validation'
-              ? 'Advance to verify and run a proportionate local validation command. If that is concretely impossible after trying, call declare_verification_blocker with the actual limitation.'
+              ? 'The host has reopened verify. Run a proportionate local validation command now. If that is concretely impossible after trying, call declare_verification_blocker with the actual limitation.'
               : completion.reason === 'failed_checks'
-                ? 'Diagnose and correct the failed validation, then rerun it. If a concrete blocker prevents completion, state that blocker with the failed result.'
+                ? 'The host has reopened implement. Diagnose and correct the failed validation, then advance to verify and rerun it. If a concrete blocker prevents completion, state that blocker with the failed result.'
                 : 'Advance to the next applicable phase and complete the remaining accepted plan steps, or state a concrete blocker with its evidence.';
             messages.push({ role: 'user', content: `The host completion verifier rejected the attempted final answer: ${completion.message} ${guidance}` });
             log(`Completion verifier: ${completion.reason}. ${completion.message}`);

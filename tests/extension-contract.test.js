@@ -121,6 +121,11 @@ test('task runtime accepts only an ordered, phase-valid plan', () => {
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['active', 'pending', 'pending', 'pending']);
   runtime.advance('implement');
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'active', 'pending', 'pending']);
+  runtime.advance('verify');
+  runtime.advance('review');
+  assert.equal(runtime.advance('verify').ok, false);
+  assert.equal(runtime.reopen('verify', 'Validation required.').ok, true);
+  assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'complete', 'active', 'pending']);
   assert.equal(runtime.setPlan([{ phase: 'work', title: 'Skip required research and analysis.' }]).ok, false);
 });
 
@@ -143,6 +148,8 @@ test('host task routing keeps a prefetched SPA source focused on its own applica
   assert.match(source, /const evidenceBudgetExhausted = activePhaseEvidenceActions >= 6/);
   assert.match(source, /if \(activePhaseEvidenceActions === 0\) visible\.delete\('advance_task_phase'\)/);
   assert.match(source, /host evidence budget for this phase is complete/);
+  assert.match(source, /Host reopened verification: a validation result is required/);
+  assert.match(source, /visible\.delete\('advance_task_phase'\)/);
 });
 
 test('task plans may begin research after initial host analysis activity', () => {
