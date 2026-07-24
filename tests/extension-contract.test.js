@@ -77,6 +77,23 @@ test('task runtime owns ordered progress and terminal state', () => {
   assert.equal(runtime.ui.finishedAt !== undefined, true);
 });
 
+test('task runtime accepts only an ordered, phase-valid plan', () => {
+  const runtime = new TaskRuntime({ mode: 'execute' });
+  runtime.transition('understand', 'active');
+  runtime.transition('analyze', 'active');
+  const planned = runtime.setPlan([
+    { phase: 'analyze', title: 'Confirm the relevant project evidence.' },
+    { phase: 'implement', title: 'Apply the focused workspace change.' },
+    { phase: 'verify', title: 'Run the relevant verification.' },
+    { phase: 'review', title: 'Review the resulting change.' }
+  ]);
+  assert.equal(planned.ok, true);
+  assert.deepEqual(runtime.ui.plan.map(item => item.status), ['active', 'pending', 'pending', 'pending']);
+  runtime.advance('implement');
+  assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'active', 'pending', 'pending']);
+  assert.equal(runtime.setPlan([{ phase: 'research', title: 'Go backwards to an invalid research phase.' }]).ok, false);
+});
+
 test('evidence store cites only deliberate host evidence, not browser telemetry', () => {
   const evidence = new EvidenceStore();
   const page = evidence.record('browser_open', 'https://dev.example.test/', 'Example IDE');
@@ -317,9 +334,11 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Model adapter rejected invalid output/);
   assert.match(modelAdapterSource, /unavailable_tool:/);
   assert.match(source, /name: 'advance_task_phase'/);
+  assert.match(source, /name: 'set_task_plan'/);
   assert.match(source, /function toolsForTaskPhase/);
   assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools\)/);
   assert.match(taskRuntimeSource, /const phaseTransitions/);
+  assert.match(taskRuntimeSource, /setPlan\(steps\)/);
   assert.match(source, /function normalizeWorkspaceAlias/);
   assert.match(source, /\^\\\/workspace\(\?:\\\/\|\$\)/);
   assert.match(source, /function normalizeToolArguments/);
@@ -407,6 +426,7 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatSource, /<details class="review-checks"/);
   assert.match(chatSource, /<details class="review-files"/);
   assert.match(chatSource, /<details class="task-activity"/);
+  assert.match(chatSource, /<details class="task-plan"/);
   assert.doesNotMatch(chatSource, /<ol>\$\{timeline\}<\/ol>/);
   assert.match(chatSource, /<i aria-hidden="true"><\/i><strong>/);
   assert.match(chatSource, /worker\$\{activeWorkers/);
@@ -415,6 +435,7 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatStyles, /\.task-panel/);
   assert.match(chatStyles, /\.task-review/);
   assert.match(chatStyles, /\.task-activity/);
+  assert.match(chatStyles, /\.task-plan/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
