@@ -1139,6 +1139,12 @@ function isDirectAgentQuestion(task) {
   const requestedWork = /\b(?:implement|oprav|fix|create|vytvor|napíš|write|run|spusť|test|analyz|research|preskúmaj|migr|compare)\b/i.test(text);
   return looksLikeQuestion && agentSubject && !requestedWork;
 }
+function isToolCatalogueEcho(value) {
+  const text = String(value || '');
+  const toolMentions = (text.match(/\b(?:web_fetch|web_search|web_download|read_downloaded_web_file|search_downloaded_web_file|list_files|read_file|search_text|write_file|run_command|git_status|git_diff|git_log|save_skill|browser_open|list_browsers)\b/gi) || []).length;
+  const parameterMentions = (text.match(/\b(?:tool|function|parameters?)\b/gi) || []).length;
+  return toolMentions >= 6 && parameterMentions >= 6;
+}
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
   activeWebSources = [];
@@ -1225,6 +1231,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let failingTest = '';
   let recoveryNudges = 0;
   let emptyResponseNudges = 0;
+  let toolCatalogueNudges = 0;
+  let activeTaskTools = taskTools;
   let promptRead = false;
   try {
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
@@ -1240,7 +1248,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           stream.text += partial.content; activeStreams.set(streamId, stream);
           postUi('assistantDelta', { id: streamId, delta: partial.content, createdAt: stream.createdAt });
         }
-      }, taskTools, masterSession);
+      }, activeTaskTools, masterSession);
       if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
@@ -1259,6 +1267,15 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
             continue;
           }
           throw new Error('Model returned no final answer after an automatic recovery attempt. Select a more capable model or retry the task.');
+        }
+        if (taskMode === 'execute' && isToolCatalogueEcho(response) && toolCatalogueNudges < 1) {
+          toolCatalogueNudges++;
+          messages.pop(); activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
+          activeTaskTools = taskTools.filter(tool => tool.function.name === 'list_files');
+          messages.push({ role: 'user', content: 'You emitted a catalogue of tool descriptions instead of working. Do not describe tools or provide a plan. Call the single available native tool now: list_files with directory ".". Return no prose.' });
+          log('Tool-catalogue recovery guard: discarded a non-actionable tool echo and restricted the next turn to list_files.');
+          updateTaskUi('continue', 'active', 'Model echoed tool descriptions; requesting one concrete workspace inspection.');
+          continue;
         }
         if (failingTest && recoveryNudges < 2) {
           recoveryNudges++;
@@ -1281,6 +1298,9 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
         if (pendingSteering) break;
       }
+      // The one-tool recovery turn only bootstraps a concrete observation.
+      // Restore the task's normal tool set after it succeeds.
+      activeTaskTools = taskTools;
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }
     }
     if (!pendingSteering) vscode.window.showWarningMessage(cancelled ? 'Ollama agent stopped.' : `Ollama agent reached its ${stepLimit}-step limit.`);

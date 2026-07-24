@@ -253,6 +253,9 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /also downloaded the primary JavaScript bundle/);
   assert.match(source, /onThinkingDisabledForTools/);
   assert.match(source, /<tool_call>/);
+  assert.match(source, /function isToolCatalogueEcho/);
+  assert.match(source, /Tool-catalogue recovery guard/);
+  assert.match(source, /restricted the next turn to list_files/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
   assert.match(browserSource, /function createFilteringProxy/);
   assert.match(browserSource, /async function publicAddress/);
