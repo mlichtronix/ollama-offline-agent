@@ -1032,6 +1032,11 @@ function compactToolCallProtocol(visibleTools) {
   return `For this one host-requested compatibility turn, the host will parse a compact JSON action instead of a native tool call. Return exactly one JSON object and nothing else in this form: {"name":"one listed action","arguments":{...}}. Do not use XML, Markdown fences, explanations, or a tool schema. Choose one action that is valid in the current host phase.\n\nAllowed actions:\n${actions}`;
 }
 
+function isRecoverableNativeToolError(error) {
+  const message = String(error?.message || error || '');
+  return /generation loop detected|generation exceeded|Ollama returned 400:.*(?:value looks like object|can't find closing ['"]?\}['"]? symbol)/i.test(message);
+}
+
 async function filesRecursive(dir, base, result) {
   const ignored = new Set(['.git', '.ollama-agent', 'node_modules', '.next', 'dist', 'build', '.venv', '__pycache__']);
   let entries;
@@ -1400,12 +1405,12 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
             if (delta) postUi('assistantDelta', { id: streamId, delta, createdAt: stream.createdAt });
           }
         }
-      }, compatibilityToolMode ? [] : activeTaskTools, masterSession, compatibilityToolMode ? undefined : (requireToolAction ? 'required' : undefined), compatibilityToolMode ? { format: 'json', disableThinking: true, numPredict: 320 } : {}); }
+      }, compatibilityToolMode ? [] : activeTaskTools, masterSession, compatibilityToolMode ? undefined : (requireToolAction ? 'required' : undefined), compatibilityToolMode ? { disableThinking: true, numPredict: 320 } : {}); }
       catch (error) {
-        if (requireToolAction && !compatibilityToolMode && /generation loop detected|generation exceeded/i.test(String(error?.message || error))) {
+        if (requireToolAction && !compatibilityToolMode && isRecoverableNativeToolError(error)) {
           compatibilityToolMode = true;
           messages.push({ role: 'user', content: compactToolCallProtocol(activeTaskTools) });
-          log('Native tool turn looped; retrying once with the compact JSON compatibility protocol.');
+          log('Native tool turn was rejected or looped; retrying once with the compact JSON compatibility protocol.');
           updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', 'Retrying the tool action with the compact compatibility protocol.');
           continue;
         }

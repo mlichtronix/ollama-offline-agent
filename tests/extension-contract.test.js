@@ -77,10 +77,10 @@ test('Ollama client supports a compact JSON compatibility turn without tools', a
   };
   try {
     const client = new OllamaClient({ getEndpoint: () => 'http://127.0.0.1:11434' });
-    const result = await client.chat({ model: 'qwen3:8b', messages: [], tools: [], temperature: 0.2, format: 'json', disableThinking: true, numPredict: 320 });
+    const result = await client.chat({ model: 'qwen3:8b', messages: [], tools: [], temperature: 0.2, disableThinking: true, numPredict: 320 });
     assert.equal(result.message.content, '{"name":"list_files","arguments":{"directory":"."}}');
     assert.deepEqual(request.tools, []);
-    assert.equal(request.format, 'json');
+    assert.equal(request.format, undefined);
     assert.equal(request.think, false);
     assert.equal(request.options.num_predict, 320);
   } finally { global.fetch = originalFetch; }
@@ -327,6 +327,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /latestUserContext/);
   assert.match(source, /compactToolCallProtocol/);
   assert.match(source, /compact JSON compatibility protocol/);
+  assert.match(source, /isRecoverableNativeToolError/);
   assert.match(source, /benchmark: true/);
   assert.match(source, /Candidate previous user request/);
   assert.match(source, /function steer\(/);
