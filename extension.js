@@ -11,6 +11,7 @@ const { ChatStore } = require('./lib/chat-store');
 const { WorkerPool, normalizeWorkers } = require('./lib/worker-pool');
 const { discoverOllamaHosts } = require('./lib/worker-discovery');
 const { discoverBrowsers, renderPage } = require('./lib/headless-browser');
+const { classifyModelMessage } = require('./lib/model-adapter');
 
 let cancelled = false;
 let running = false;
@@ -1099,54 +1100,9 @@ async function chat(messages, onChunk, taskTools = tools, runtime = {}) {
     });
   } finally { releaseActiveAbortController(controller); }
 }
-function extractCalls(message) {
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length) return message.tool_calls;
-  // Some otherwise capable local model templates emit the requested call as
-  // JSON in content instead of Ollama's tool_calls field. Some emit several
-  // calls as fenced JSON blocks. Accept only known tool names; the host still
-  // performs all permission checks before any side effect.
-  const raw = String(message.content || '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
-  const known = new Set(tools.map(tool => tool.function.name));
-  const asCalls = value => (Array.isArray(value) ? value : [value]).filter(item => {
-    const name = item?.function?.name || item?.name;
-    return known.has(name);
-  }).map(item => ({
-    function: item.function ? { name: item.function.name, arguments: typeof item.function.arguments === 'string' ? item.function.arguments : JSON.stringify(item.function.arguments || {}) } : { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) }
-  }));
-  try { const calls = asCalls(JSON.parse(raw)); if (calls.length) return calls; } catch {}
-  const calls = [];
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/gi;
-  let match;
-  while ((match = fenced.exec(String(message.content || '')))) {
-    try { calls.push(...asCalls(JSON.parse(match[1].trim()))); } catch {}
-  }
-  if (calls.length) return calls;
-  // Qwen 2.5 Coder occasionally ignores the tool-call template and emits
-  // `tool_name {"argument":"value"}` as ordinary content. Recognize only
-  // a known name followed by one balanced JSON object; executeTool still
-  // applies the same permission prompts and guardrails.
-  const text = String(message.content || '') + '\n' + String(message.thinking || '');
-  const xmlCalls = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
-  let xml;
-  while ((xml = xmlCalls.exec(text))) {
-    try { const value = JSON.parse(xml[1]); if (known.has(value?.name) && value.arguments && typeof value.arguments === 'object') calls.push({ function: { name: value.name, arguments: JSON.stringify(value.arguments) } }); } catch {}
-  }
-  if (calls.length) return calls;
-  const plainCall = new RegExp(`\\b(${[...known].join('|')})\\s*` + '\\{', 'g');
-  while ((match = plainCall.exec(text))) {
-    const start = plainCall.lastIndex - 1; let depth = 0; let quoted = false; let escaped = false; let end = -1;
-    for (let index = start; index < text.length; index++) {
-      const char = text[index];
-      if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
-      if (char === '"') { quoted = true; continue; }
-      if (char === '{') depth++;
-      if (char === '}' && --depth === 0) { end = index + 1; break; }
-    }
-    if (end < 0) continue;
-    try { const argumentsObject = JSON.parse(text.slice(start, end)); calls.push({ function: { name: match[1], arguments: JSON.stringify(argumentsObject) } }); } catch {}
-    plainCall.lastIndex = end;
-  }
-  return calls;
+function extractCalls(message, availableTools = tools) {
+  const classified = classifyModelMessage(message, availableTools);
+  return classified.kind === 'tool_call' ? classified.calls : [];
 }
 function isTestCommand(call) {
   if (call.function.name !== 'run_command') return false;
@@ -1159,18 +1115,6 @@ function isDirectAgentQuestion(task) {
   const agentSubject = /\b(?:agent|plugin|extension|worker|model|tool|nástroj|odpoveď|response|chat|konverzáci|históri)/i.test(text);
   const requestedWork = /\b(?:implement|oprav|fix|create|vytvor|napíš|write|run|spusť|test|analyz|research|preskúmaj|migr|compare)\b/i.test(text);
   return looksLikeQuestion && agentSubject && !requestedWork;
-}
-function isToolCatalogueEcho(value) {
-  const text = String(value || '');
-  const toolMentions = (text.match(/\b(?:web_fetch|web_search|web_download|read_downloaded_web_file|search_downloaded_web_file|list_files|read_file|search_text|write_file|run_command|git_status|git_diff|git_log|save_skill|browser_open|list_browsers)\b/gi) || []).length;
-  const parameterMentions = (text.match(/\b(?:tool|function|parameters?)\b/gi) || []).length;
-  return toolMentions >= 6 && parameterMentions >= 6;
-}
-function isRepetitiveProgressEcho(value) {
-  const paragraphs = String(value || '').replace(/\r/g, '').split(/\n\s*\n/).map(part => part.replace(/\s+/g, ' ').trim().toLowerCase()).filter(part => part.length >= 48);
-  const counts = new Map();
-  for (const paragraph of paragraphs) counts.set(paragraph, (counts.get(paragraph) || 0) + 1);
-  return [...counts.values()].some(count => count >= 3);
 }
 async function ask(initialTask, providedId, attachments = [], replyTo, continuationMessages, requestedMode = 'execute', editId) {
   if (running) return vscode.window.showInformationMessage('Ollama Offline Agent is already working.');
@@ -1258,8 +1202,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let failingTest = '';
   let recoveryNudges = 0;
   let emptyResponseNudges = 0;
-  let toolCatalogueNudges = 0;
-  let repetitiveResponseNudges = 0;
+  let invalidOutputNudges = 0;
   const failedToolCalls = new Map();
   let activeTaskTools = taskTools;
   let promptRead = false;
@@ -1284,11 +1227,23 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
       if (thinkingStarted) output.appendLine('');
       const message = data.message;
-      messages.push(message);
-      const calls = extractCalls(message);
+      const classified = classifyModelMessage(message, activeTaskTools);
+      const calls = classified.kind === 'tool_call' ? classified.calls : [];
+      if (classified.kind === 'tool_call') messages.push(message);
       if (!calls.length) {
-        const streamedResponse = activeStreams.get(streamId)?.text; const response = String(streamedResponse || message.content || '').trim();
-        if (!response) {
+        const streamedResponse = activeStreams.get(streamId)?.text; const response = String(classified.content || streamedResponse || message.content || '').trim();
+        if (classified.kind === 'invalid_model_output') {
+          activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
+          if (invalidOutputNudges < 1) {
+            invalidOutputNudges++;
+            messages.push({ role: 'user', content: `The last model output was rejected by the runtime (${classified.reason}). Do not repeat internal tool instructions, XML, JSON schemas, or a plan. Make one valid native tool call, or provide a concise final answer based only on completed actions.` });
+            log(`Model adapter rejected invalid output: ${classified.reason}. Requesting one concrete continuation.`);
+            updateTaskUi('continue', 'active', 'Model output was invalid; requesting a concrete continuation.');
+            continue;
+          }
+          throw new Error(`Model produced invalid agent output twice (${classified.reason}). Select a model with reliable native tool calling or retry the task.`);
+        }
+        if (classified.kind === 'empty' || !response) {
           activeStreams.delete(streamId);
           postUi('assistantClear', { id: streamId });
           if (emptyResponseNudges < 1) {
@@ -1300,23 +1255,6 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           }
           throw new Error('Model returned no final answer after an automatic recovery attempt. Select a more capable model or retry the task.');
         }
-        if (taskMode === 'execute' && isToolCatalogueEcho(response) && toolCatalogueNudges < 1) {
-          toolCatalogueNudges++;
-          messages.pop(); activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
-          activeTaskTools = taskTools.filter(tool => tool.function.name === 'list_files');
-          messages.push({ role: 'user', content: 'You emitted a catalogue of tool descriptions instead of working. Do not describe tools or provide a plan. Call the single available native tool now: list_files with directory ".". Return no prose.' });
-          log('Tool-catalogue recovery guard: discarded a non-actionable tool echo and restricted the next turn to list_files.');
-          updateTaskUi('continue', 'active', 'Model echoed tool descriptions; requesting one concrete workspace inspection.');
-          continue;
-        }
-        if (isRepetitiveProgressEcho(response) && repetitiveResponseNudges < 1) {
-          repetitiveResponseNudges++;
-          messages.pop(); activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
-          messages.push({ role: 'user', content: 'Your last response repeated the same progress text and did not report a completed action or blocker. Do not repeat a plan. Continue from the latest successful tool result, make one concrete next tool call, or give a concise blocker grounded in that result.' });
-          log('Repetitive-response recovery guard: discarded repeated progress prose and requested one concrete continuation.');
-          updateTaskUi('continue', 'active', 'Model repeated progress prose; requesting a concrete continuation.');
-          continue;
-        }
         if (failingTest && recoveryNudges < 2) {
           recoveryNudges++;
           activeStreams.delete(streamId);
@@ -1325,6 +1263,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
+        messages.push(message);
         const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi.state = 'complete'; activeTaskUi.finishedAt ||= new Date().toISOString(); updateTaskUi(taskMode === 'plan' ? 'plan' : 'complete', 'complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;
       }
       activeStreams.delete(streamId);

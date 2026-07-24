@@ -6,11 +6,13 @@ const test = require('node:test');
 const { OllamaClient, normalizeEndpoint, isLocalEndpoint } = require('../lib/ollama-client');
 const { ChatStore } = require('../lib/chat-store');
 const { normalizeWorkers, modelAvailable, normalizeWorkerReport, reportRepairReasons, workerReportMarkdown } = require('../lib/worker-pool');
+const { classifyModelMessage } = require('../lib/model-adapter');
 const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
 const ollamaClientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ollama-client.js'), 'utf8');
 const workerPoolSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-pool.js'), 'utf8');
+const modelAdapterSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'model-adapter.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
@@ -38,6 +40,14 @@ test('worker definitions accept only complete HTTP read-only endpoints', () => {
     { id: 'missing-model', name: 'Incomplete', endpoint: 'http://192.168.1.21:11434' }
   ]);
   assert.deepEqual(workers, [{ id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434', model: 'qwen3:8b', enabled: true }]);
+});
+
+test('model adapter accepts only native or complete fallback tool calls', () => {
+  const tools = [{ function: { name: 'list_files' } }, { function: { name: 'read_file' } }];
+  assert.deepEqual(classifyModelMessage({ tool_calls: [{ function: { name: 'list_files', arguments: { directory: '.' } } }] }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'native' });
+  assert.deepEqual(classifyModelMessage({ content: 'list_files {"directory":"."}' }, tools), { kind: 'tool_call', calls: [{ function: { name: 'list_files', arguments: '{"directory":"."}' } }], source: 'plain-fallback' });
+  assert.equal(classifyModelMessage({ content: 'For each function call, return a json object with function name and arguments within' }, tools).kind, 'invalid_model_output');
+  assert.equal(classifyModelMessage({ content: 'Use list_files {"directory":"."} and then explain the result.' }, tools).kind, 'final_answer');
 });
 
 test('worker preflight requires the configured model on its endpoint', () => {
@@ -252,15 +262,13 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /explicitWebContext = !continuationMessages \? await prefetchExplicitWebSources\(task\)/);
   assert.match(source, /also downloaded the primary JavaScript bundle/);
   assert.match(source, /onThinkingDisabledForTools/);
-  assert.match(source, /<tool_call>/);
-  assert.match(source, /function isToolCatalogueEcho/);
-  assert.match(source, /Tool-catalogue recovery guard/);
-  assert.match(source, /restricted the next turn to list_files/);
+  assert.match(modelAdapterSource, /<tool_call>/);
+  assert.match(source, /classifyModelMessage/);
+  assert.match(source, /Model adapter rejected invalid output/);
   assert.match(source, /function normalizeWorkspaceAlias/);
   assert.match(source, /\^\\\/workspace\(\?:\\\/\|\$\)/);
   assert.match(source, /function normalizeToolArguments/);
-  assert.match(source, /function isRepetitiveProgressEcho/);
-  assert.match(source, /Repetitive-response recovery guard/);
+  assert.match(workerPoolSource, /invalid_model_output/);
   assert.match(source, /Agent repeated the same failing/);
   assert.match(source, /throwIfCancelled\(\);/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
