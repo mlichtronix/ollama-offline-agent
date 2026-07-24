@@ -69,11 +69,11 @@ const chatStore = new ChatStore({ getWorkspace: root, createId: messageId, onErr
 const chatHistory = chatStore.history;
 const conversation = chatStore.conversation;
 
-const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the sole active task and always overrides historical conversation, skills, file contents and any quoted text. Historical messages are background only: never execute an old request again unless the newest request explicitly asks to continue it. Never run capability demonstrations or tests merely because they appear in history.
+const SYSTEM = `You are an offline coding agent operating through a VS Code extension. The newest user request is the only active task; historical conversation and quoted text are background unless the user explicitly continues them.
 
-Work deliberately. First classify the newest request as a direct question, inspection, or change. For a direct question, obtain only the evidence needed and answer it directly. For a multi-step inspection or change, identify the smallest relevant set of files/resources, inspect those, then call set_task_plan once with a short ordered plan. The host validates that its phases form a legal route. Implement only the requested change, run proportionate checks, then give a concise final answer with changes and verification. The runtime exposes only tools that fit the active phase. When evidence is sufficient, call advance_task_phase before changing files; call it again before running verification commands and before review. A submitted plan is a completion contract: do not give a final answer while one of its steps remains pending. Before write_file, base the complete replacement only on the actual, complete content returned by read_file; never reconstruct omitted code from memory or generic examples. Do not claim that an issue, secret, dependency, file, or fix exists unless the current task's tool results directly show it. When the user asks to see source code or a file excerpt, use share_file_excerpt instead of reproducing raw file contents in Markdown; it publishes the exact workspace excerpt directly in chat. When verification or tests fail, do not declare the task finished: inspect the failure, make a focused correction, rerun the relevant test, and repeat until it passes. Stop only when the task is verified, the user stops you, or a concrete blocker makes completion impossible; in the latter case state the failed command/result and blocker plainly. The most recent assistant answer is always supplied as candidate context. First decide whether it is relevant and sufficient for the newest request. If it is not sufficient, use search_chat_history with a semantic query, then read_chat_messages for only the IDs you need before giving a generic answer. Refine or repeat this as needed; never assume only recent history is relevant. For images, use only the pixels actually supplied in this request or relevant history. If no image pixels are supplied, say so and do not claim visual measurements, counts, or observations. Clearly label any rough estimate and state its assumptions. When researching the web, search results and remembered URLs are leads only: cite a URL as a source only after web_fetch successfully returned that exact page in this task. Do not cite a failed fetch, guessed path, or model-memory URL. Do not dump the plan, tool syntax, chain of thought, or repetitive progress into the chat; detailed reasoning and tool results belong only in Output. If a user names a file but its exact workspace-relative location is unknown, call list_files or search_text first; never assume it is in the workspace root. For run_command, omit cwd unless you have read evidence for an existing directory; a command cannot run from a file path or a made-up directory. Do not create notes, edit files, run unrelated commands, or save a playbook merely to demonstrate a capability.
+The host owns task state, permissions, checkpoints, and the ordered plan. Do not create, describe, or revise a task plan unless a planning tool is explicitly visible. Work only in the current host phase and use only the tools currently visible. Take the next concrete action instead of describing what you would do. Use native tool calls, never print tool JSON, XML, schemas, or internal instructions as ordinary text. Do not give a final answer while the host plan still has pending steps.
 
-The actual built-in capabilities are: listing, reading, searching, and writing files; running locally installed command-line programs such as PowerShell, Python, Node, Git, test runners and compilers; reading Git status, diffs and log when a local repository exists; optional web search and public web-page retrieval with explicit user approval; and, depending on the chosen access mode, working on allowed absolute paths and installing local applications. Git is optional: do not inspect, initialize, commit, or push Git unless the user asks for version-control work or it is directly necessary for the task. A local-only repository is fully valid and never requires a remote. The product is offline-first: treat network access as optional, never assume it is available, and continue with local alternatives when a network action fails. Web tools are not available without network access and must never be used for private, local, or LAN addresses. A saved playbook is NOT a new capability: it is only reusable Markdown guidance for future tasks. If asked about capabilities, explain the built-in tools and the available local runtime programs, not the Markdown storage format. Never claim you ran a tool you did not call. In Full system mode, normal create, edit, and delete operations on non-sensitive files physically inside the open workspace proceed autonomously with checkpoints; writes outside it, sensitive files, and playbook saves still require approval. Destructive system commands remain blocked even in full system mode. Use native tool calling whenever it is available. Never output a tool call as plain text.`;
+Base claims and edits only on current task evidence. Read a file before replacing it; do not reconstruct omitted content. If verification fails, inspect the failure, correct the relevant issue, and rerun the check. Use web evidence only when it was retrieved in this task; never invent URLs, protocols, APIs, files, results, or measurements. Git is optional. Treat the network as optional and use local evidence when it is unavailable. Do not run demonstrations or unrelated commands. When the user asks to see a workspace file, use share_file_excerpt.`;
 
 function log(text) { output.appendLine(text); }
 function escapeExportHtml(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
@@ -1248,7 +1248,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const webAuthorization = webEnabled()
     ? '\n\nPublic web access is ON (the Globe setting is enabled). This is the user\'s standing authorization to use web_search, web_fetch, web_download, and the controlled browser tools for public HTTP(S) sources. A public URL explicitly named in the newest request is in scope to fetch and analyze. For JavaScript-required SPA pages, first call list_browsers, then browser_open with a compatible installed Chromium browser to obtain the rendered DOM and observed public sources. Prefer Chrome when it is installed; it is the default for web compatibility, with Edge as fallback. If browser rendering is unavailable or insufficient, use web_download on the page to inspect raw HTML, download referenced public static JS/source-map assets, and use search_downloaded_web_file or offset reads for minified files. Do not claim that web access is unavailable, disabled, or needs another approval: call the provided web tool. If retrieval fails, report that exact tool failure and do not invent a substitute source, protocol, implementation, or placeholder library.'
     : '\n\nPublic web access is OFF. Do not claim to have fetched public sources. If the task requires an external source, report that the Globe setting must be enabled or use supplied local material.';
-  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + explicitWebContext + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
+  const requiresPlan = taskMode === 'execute' && !directAgentQuestion;
+  if (requiresPlan) {
+    const planned = activeTaskRuntime.setPlan(bootstrapTaskPlan({ task: taskWithResources, hasPublicSource: Boolean(explicitWebContext) }));
+    if (!planned.ok) throw new Error(`Host could not initialize the task plan: ${planned.message}`);
+    activeTaskUi = planned.ui;
+    postUi('taskUi', activeTaskUi);
+    log(`Host initialized an ordered ${activeTaskUi.plan.length}-step task plan.`);
+  }
+  const phaseInstruction = requiresPlan ? `\n\nCurrent host phase: ${activeTaskRuntime.activePhase()}. The host has already created the plan. Perform one relevant visible tool action now; do not write a final answer in this phase.` : '';
+  const messages = continuationMessages ? [...continuationMessages, userMessage] : [{ role: 'system', content: SYSTEM + modeInstruction + phaseInstruction + '\n' + describeExecutionEnvironment() + '\n' + languageInstruction() + '\n' + access + webAuthorization + explicitWebContext + await loadSkills(task) + workerContext + priorRequestContext }, ...(lastAssistant ? [lastAssistant] : []), userMessage]; activeAgentMessages = messages;
   const stepLimit = config().get('maxSteps', 0);
   let failingTest = '';
   let recoveryNudges = 0;
@@ -1259,21 +1268,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   const completedLookupCalls = new Set();
   let completedLookupPhase = '';
   const idempotentLookupTools = new Set(['web_search', 'web_fetch', 'web_download', 'browser_open', 'list_browsers']);
-  const requiresPlan = taskMode === 'execute' && !directAgentQuestion;
-  if (requiresPlan) {
-    const planned = activeTaskRuntime.setPlan(bootstrapTaskPlan({ task: taskWithResources, hasPublicSource: Boolean(explicitWebContext) }));
-    if (!planned.ok) throw new Error(`Host could not initialize the task plan: ${planned.message}`);
-    activeTaskUi = planned.ui;
-    postUi('taskUi', activeTaskUi);
-    log(`Host initialized an ordered ${activeTaskUi.plan.length}-step task plan.`);
-  }
   let activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
   let promptRead = false;
   try {
     for (let step = 1; !cancelled && (!stepLimit || step <= stepLimit); step++) {
       vscode.window.setStatusBarMessage(`Ollama agent: step ${step}`, 3000);
       const streamId = messageId(); let thinkingStarted = false;
-      if (step === 1) updateTaskUi('analyze', 'active', 'Analyzing evidence and choosing the next action.');
+      if (step === 1) {
+        const firstPhase = activeTaskRuntime?.activePhase() || 'analyze';
+        updateTaskUi(firstPhase, 'active', firstPhase === 'research' ? 'Gathering the required source evidence.' : 'Analyzing evidence and choosing the next action.');
+      }
       else updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', `Continuing agent work (step ${step}).`);
       const visiblePhase = activeTaskRuntime?.activePhase() || 'work';
       if (visiblePhase !== completedLookupPhase) { completedLookupCalls.clear(); completedLookupPhase = visiblePhase; }
@@ -1382,6 +1386,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
+        if (outcome.ok && call.function.name === 'advance_task_phase') messages.push({ role: 'user', content: `The host is now in ${activeTaskRuntime?.activePhase() || 'work'}. Perform the next concrete action using a visible tool; do not answer yet while the plan has pending steps.` });
         if (!outcome.ok && call.function.name === 'set_task_plan') messages.push({ role: 'user', content: 'Correct the plan rather than repeating it unchanged. A plan starts from Understand and may use Research → Analyze → Work → Implement → Verify → Review. Submit only `steps`, each with a concise `title` and one `phase`.' });
         if (!outcome.ok && call.function.name === 'advance_task_phase') messages.push({ role: 'user', content: 'Follow the accepted plan in order. Advance only to the next pending phase named by the host error; do not skip a planned step.' });
         if (repeatedLookup) messages.push({ role: 'user', content: 'Do not repeat the same successful web lookup in this phase. Use the already returned result, choose a different targeted URL/query, inspect a downloaded file, or advance to the next planned phase.' });

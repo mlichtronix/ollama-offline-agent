@@ -272,7 +272,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /configured VS Code integrated-terminal profile/);
   assert.match(source, /search_chat_history/);
   assert.match(source, /read_chat_messages/);
-  assert.match(source, /most recent assistant answer is always supplied as candidate context/);
+  assert.match(source, /lastAssistant \? \[lastAssistant\] : \[\]/);
   assert.match(source, /latestAssistantContext/);
   assert.match(source, /latestUserContext/);
   assert.match(source, /benchmark: true/);
@@ -304,7 +304,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /command working directory does not exist or is inaccessible/);
   assert.match(source, /command cwd is not a directory/);
   assert.match(source, /cached runner can become stale/);
-  assert.match(source, /Before write_file, base the complete replacement only on the actual, complete content returned by read_file/);
+  assert.match(source, /Read a file before replacing it; do not reconstruct omitted content/);
   assert.match(source, /'-NoProfile', '-NonInteractive'/);
   assert.match(chatSource, /data-steering-mode/);
   assert.match(chatSource, /Queue follow-up/);
@@ -374,7 +374,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /parseDelegationPlan\(response\.message\?\.content, workers, maxTasks\)/);
   assert.doesNotMatch(workerPoolSource, /Reply in \$\{context\.language\}/);
   assert.match(source, /search-result snippet, model memory, or a secondary summary is not verification/i);
-  assert.match(source, /cite a URL as a source only after web_fetch successfully returned that exact page/i);
+  assert.match(source, /Use web evidence only when it was retrieved in this task/);
   assert.match(source, /Public web access is ON \(the Globe setting is enabled\)/);
   assert.match(source, /function workerFailureReason/);
   assert.match(source, /name: 'web_download'/);
