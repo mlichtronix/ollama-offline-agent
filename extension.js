@@ -1073,7 +1073,8 @@ async function chat(messages, onChunk, taskTools = tools, runtime = {}) {
       temperature: Number(config().get('temperature', 0.2)),
       contextWindow: Number(runtime.contextWindow ?? config().get('contextWindow', 0)),
       signal: controller.signal, onChunk,
-      onThinkingUnsupported: model => log(`Model ${model} does not support thinking; continuing without it.`)
+      onThinkingUnsupported: model => log(`Model ${model} does not support thinking; continuing without it.`),
+      onThinkingDisabledForTools: model => log(`Model ${model}: thinking is disabled for this tool-using turn to preserve reliable tool calls.`)
     });
   } finally { releaseActiveAbortController(controller); }
 }
@@ -1103,7 +1104,13 @@ function extractCalls(message) {
   // `tool_name {"argument":"value"}` as ordinary content. Recognize only
   // a known name followed by one balanced JSON object; executeTool still
   // applies the same permission prompts and guardrails.
-  const text = String(message.content || '');
+  const text = String(message.content || '') + '\n' + String(message.thinking || '');
+  const xmlCalls = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+  let xml;
+  while ((xml = xmlCalls.exec(text))) {
+    try { const value = JSON.parse(xml[1]); if (known.has(value?.name) && value.arguments && typeof value.arguments === 'object') calls.push({ function: { name: value.name, arguments: JSON.stringify(value.arguments) } }); } catch {}
+  }
+  if (calls.length) return calls;
   const plainCall = new RegExp(`\\b(${[...known].join('|')})\\s*` + '\\{', 'g');
   while ((match = plainCall.exec(text))) {
     const start = plainCall.lastIndex - 1; let depth = 0; let quoted = false; let escaped = false; let end = -1;

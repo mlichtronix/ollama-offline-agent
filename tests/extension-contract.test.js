@@ -251,6 +251,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /Host prefetching explicit public source/);
   assert.match(source, /explicitWebContext = !continuationMessages \? await prefetchExplicitWebSources\(task\)/);
   assert.match(source, /also downloaded the primary JavaScript bundle/);
+  assert.match(source, /onThinkingDisabledForTools/);
+  assert.match(source, /<tool_call>/);
   assert.match(workerPoolSource, /call list_browsers then browser_open/);
   assert.match(browserSource, /function createFilteringProxy/);
   assert.match(browserSource, /async function publicAddress/);
