@@ -1356,6 +1356,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);
         messages.push({ role: 'tool', tool_name: call.function.name, content: result });
+        if (!outcome.ok && call.function.name === 'set_task_plan') messages.push({ role: 'user', content: 'Correct the plan rather than repeating it unchanged. A plan starts from Understand and may use Research → Analyze → Work → Implement → Verify → Review. Submit only `steps`, each with a concise `title` and one `phase`.' });
         if (pendingSteering) break;
       }
       if (pendingSteering) { log('Steering accepted at the completed subtask boundary.'); break; }

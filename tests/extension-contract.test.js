@@ -113,7 +113,21 @@ test('task runtime accepts only an ordered, phase-valid plan', () => {
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['active', 'pending', 'pending', 'pending']);
   runtime.advance('implement');
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'active', 'pending', 'pending']);
-  assert.equal(runtime.setPlan([{ phase: 'research', title: 'Go backwards to an invalid research phase.' }]).ok, false);
+  assert.equal(runtime.setPlan([{ phase: 'work', title: 'Skip required research and analysis.' }]).ok, false);
+});
+
+test('task plans may begin research after initial host analysis activity', () => {
+  const runtime = new TaskRuntime({ mode: 'execute' });
+  runtime.transition('understand', 'active');
+  runtime.transition('analyze', 'active', 'Initial host classification.');
+  const planned = runtime.setPlan([
+    { phase: 'research', title: 'Inspect the public implementation evidence.' },
+    { phase: 'analyze', title: 'Analyze the retrieved source material.' },
+    { phase: 'work', title: 'Prepare the workspace implementation.' }
+  ]);
+  assert.equal(planned.ok, true);
+  assert.equal(runtime.activePhase(), 'research');
+  assert.equal(runtime.ui.plan[0].status, 'active');
 });
 
 test('completion verifier requires observed validation after workspace changes', () => {
