@@ -15,6 +15,7 @@ const { classifyModelMessage } = require('./lib/model-adapter');
 const { TaskRuntime } = require('./lib/task-runtime');
 const { EvidenceStore } = require('./lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('./lib/tool-broker');
+const { verifyCompletion } = require('./lib/completion-verifier');
 
 let cancelled = false;
 let running = false;
@@ -926,13 +927,14 @@ const tools = [
   { type: 'function', function: { name: 'git_log', description: 'Read recent Git commits. No changes are made.', parameters: { type: 'object', properties: { count: { type: 'number', minimum: 1, maximum: 50 } } } } },
   { type: 'function', function: { name: 'save_skill', description: 'Save a reusable local playbook as Markdown guidance for future tasks. This does not add tools or system permissions. Requires user approval.', parameters: { type: 'object', properties: { name: { type: 'string' }, instructions: { type: 'string' } }, required: ['name', 'instructions'] } } },
   { type: 'function', function: { name: 'set_task_plan', description: 'Submit one concise ordered host-managed plan for a multi-step task. The host validates phase order and renders it in Task. This changes no files and runs no command.', parameters: { type: 'object', properties: { steps: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object', properties: { title: { type: 'string', minLength: 3, maxLength: 140 }, phase: { type: 'string', enum: ['research', 'analyze', 'work', 'implement', 'verify', 'review'] } }, required: ['title', 'phase'] } } }, required: ['steps'] } } },
+  { type: 'function', function: { name: 'declare_verification_blocker', description: 'Record a concrete reason why a changed workspace cannot be validated with a local command. Use only after entering verify and attempting the proportionate check. This changes no files and is shown in Task review.', parameters: { type: 'object', properties: { reason: { type: 'string', minLength: 12, maxLength: 600 } }, required: ['reason'] } } },
   { type: 'function', function: { name: 'advance_task_phase', description: 'Advance the host-managed task after completing the current phase. Use implement before changing files, verify before running validation commands, and review when ready to inspect results. This changes no files and runs no command.', parameters: { type: 'object', properties: { phase: { type: 'string', enum: ['research', 'analyze', 'work', 'implement', 'verify', 'review'], description: 'The next task phase.' }, reason: { type: 'string', maxLength: 500, description: 'Short evidence-based reason for the transition.' } }, required: ['phase'] } } }
 ];
 const workerToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'list_browsers', 'browser_open', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']);
 const workerTools = tools.filter(tool => workerToolNames.has(tool.function.name));
 const evidenceToolNames = new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'share_file_excerpt', 'web_search', 'list_browsers', 'browser_open', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']);
 const implementationToolNames = new Set(['write_file', 'delete_file', 'save_skill']);
-const verificationToolNames = new Set(['run_command']);
+const verificationToolNames = new Set(['run_command', 'declare_verification_blocker']);
 const reviewToolNames = new Set(['git_status', 'git_diff', 'git_log', 'rollback_last_change']);
 function toolsForTaskPhase(candidates) {
   const phase = activeTaskRuntime?.activePhase() || 'understand';
@@ -971,6 +973,13 @@ async function executeToolRaw(call) {
       if (!planned?.ok) return `Tool error: ${planned?.message || 'No active task runtime.'}`;
       activeTaskUi = planned.ui; postUi('taskUi', activeTaskUi);
       return `Task plan accepted with ${activeTaskUi.plan.length} ordered step(s).`;
+    }
+    if (call.function.name === 'declare_verification_blocker') {
+      if (activeTaskRuntime?.activePhase() !== 'verify') return 'Tool error: advance the task to verify before recording a verification blocker.';
+      const recorded = activeTaskRuntime.setVerificationBlocker(args.reason);
+      if (!recorded.ok) return `Tool error: ${recorded.message}`;
+      activeTaskUi = recorded.ui; postUi('taskUi', activeTaskUi);
+      return 'Recorded verification blocker. Explain it plainly in the final answer.';
     }
     if (call.function.name === 'advance_task_phase') {
       const target = String(args.phase || '');
@@ -1243,7 +1252,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let recoveryNudges = 0;
   let emptyResponseNudges = 0;
   let invalidOutputNudges = 0;
-  let incompletePlanNudges = 0;
+  let completionVerifierNudges = 0;
   const failedToolCalls = new Map();
   let activeTaskTools = toolsForTaskPhase(taskTools);
   let promptRead = false;
@@ -1306,19 +1315,23 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           log(`Test recovery guard: asking the agent to continue (${recoveryNudges}/2).`);
           continue;
         }
-        const pendingPlan = (activeTaskRuntime?.incompletePlan() || []).filter(item => item.status === 'pending');
-        if (pendingPlan.length) {
+        const completion = verifyCompletion(activeTaskRuntime?.ui);
+        if (!completion.ok) {
           activeStreams.delete(streamId);
           postUi('assistantClear', { id: streamId });
-          if (incompletePlanNudges < 1) {
-            incompletePlanNudges++;
-            const remaining = pendingPlan.map(item => `${item.phase}: ${item.title}`).join('; ');
-            messages.push({ role: 'user', content: `A host-accepted task plan still has pending steps: ${remaining}. Do not finish yet. Advance to the next applicable phase and complete the remaining plan, or state a concrete blocker with its evidence.` });
-            log(`Plan completion guard: ${pendingPlan.length} planned step(s) remain.`);
+          if (completionVerifierNudges < 1) {
+            completionVerifierNudges++;
+            const guidance = completion.reason === 'missing_validation'
+              ? 'Advance to verify and run a proportionate local validation command. If that is concretely impossible after trying, call declare_verification_blocker with the actual limitation.'
+              : completion.reason === 'failed_checks'
+                ? 'Diagnose and correct the failed validation, then rerun it. If a concrete blocker prevents completion, state that blocker with the failed result.'
+                : 'Advance to the next applicable phase and complete the remaining accepted plan steps, or state a concrete blocker with its evidence.';
+            messages.push({ role: 'user', content: `The host completion verifier rejected the attempted final answer: ${completion.message} ${guidance}` });
+            log(`Completion verifier: ${completion.reason}. ${completion.message}`);
             updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', 'Completing the remaining planned work.');
             continue;
           }
-          throw new Error(`Agent attempted to finish with ${pendingPlan.length} pending planned step(s).`);
+          throw new Error(`Completion verifier rejected the task: ${completion.message}`);
         }
         messages.push(message);
         const createdAt = activeStreams.get(streamId)?.createdAt; activeStreams.delete(streamId); activeTaskUi = activeTaskRuntime.finish('complete', taskMode === 'plan' ? 'Plan is ready for review.' : 'Agent response is ready.'); postUi('taskUi', activeTaskUi); log(`Agent:\n${response}`); rememberAssistant(response, streamId, createdAt); return;

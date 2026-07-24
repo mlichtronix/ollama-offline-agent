@@ -10,6 +10,7 @@ const { classifyModelMessage } = require('../lib/model-adapter');
 const { TaskRuntime } = require('../lib/task-runtime');
 const { EvidenceStore } = require('../lib/evidence-store');
 const { prepareToolCall, toolResult, serializeToolResult, parseToolResult } = require('../lib/tool-broker');
+const { verifyCompletion } = require('../lib/completion-verifier');
 const { ipv4ToUint32, uint32ToIpv4, netmaskToPrefixLength, isPrivateIpv4, localIpv4Interfaces, subnetHosts } = require('../lib/worker-discovery');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
@@ -19,6 +20,7 @@ const modelAdapterSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'mo
 const taskRuntimeSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'task-runtime.js'), 'utf8');
 const evidenceStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'evidence-store.js'), 'utf8');
 const toolBrokerSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tool-broker.js'), 'utf8');
+const completionVerifierSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'completion-verifier.js'), 'utf8');
 const workerDiscoverySource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'worker-discovery.js'), 'utf8');
 const browserSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'headless-browser.js'), 'utf8');
 
@@ -92,6 +94,15 @@ test('task runtime accepts only an ordered, phase-valid plan', () => {
   runtime.advance('implement');
   assert.deepEqual(runtime.ui.plan.map(item => item.status), ['complete', 'active', 'pending', 'pending']);
   assert.equal(runtime.setPlan([{ phase: 'research', title: 'Go backwards to an invalid research phase.' }]).ok, false);
+});
+
+test('completion verifier requires observed validation after workspace changes', () => {
+  const base = { mode: 'execute', plan: [], files: [{ path: 'src/example.py' }], checks: [] };
+  assert.deepEqual(verifyCompletion(base), { ok: false, reason: 'missing_validation', phase: 'verify', message: 'Workspace files changed but no verification command or recorded blocker exists.' });
+  assert.equal(verifyCompletion({ ...base, checks: [{ passed: true, command: 'python -m pytest' }] }).ok, true);
+  assert.equal(verifyCompletion({ ...base, checks: [{ passed: false, command: 'python -m pytest' }] }).reason, 'failed_checks');
+  assert.equal(verifyCompletion({ ...base, verification: { blocker: 'The project has no installed runtime or test command.' } }).verification, 'blocked');
+  assert.match(completionVerifierSource, /host-observed task state/);
 });
 
 test('evidence store cites only deliberate host evidence, not browser telemetry', () => {
@@ -335,6 +346,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(modelAdapterSource, /unavailable_tool:/);
   assert.match(source, /name: 'advance_task_phase'/);
   assert.match(source, /name: 'set_task_plan'/);
+  assert.match(source, /name: 'declare_verification_blocker'/);
+  assert.match(source, /verifyCompletion\(activeTaskRuntime\?\.ui\)/);
   assert.match(source, /function toolsForTaskPhase/);
   assert.match(source, /activeTaskTools = toolsForTaskPhase\(taskTools\)/);
   assert.match(taskRuntimeSource, /const phaseTransitions/);
@@ -427,6 +440,7 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatSource, /<details class="review-files"/);
   assert.match(chatSource, /<details class="task-activity"/);
   assert.match(chatSource, /<details class="task-plan"/);
+  assert.match(chatSource, /Verification blocked:/);
   assert.doesNotMatch(chatSource, /<ol>\$\{timeline\}<\/ol>/);
   assert.match(chatSource, /<i aria-hidden="true"><\/i><strong>/);
   assert.match(chatSource, /worker\$\{activeWorkers/);
@@ -436,6 +450,7 @@ test('task modes enforce read-only planning and expose timeline review state', (
   assert.match(chatStyles, /\.task-review/);
   assert.match(chatStyles, /\.task-activity/);
   assert.match(chatStyles, /\.task-plan/);
+  assert.match(chatStyles, /\.review-blocker/);
 });
 
 test('remote Ollama configuration keeps credentials out of workspace settings', () => {
