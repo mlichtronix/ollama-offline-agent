@@ -152,6 +152,8 @@ test('host task routing keeps a prefetched SPA source focused on its own applica
   assert.match(source, /host evidence budget for this phase is complete/);
   assert.match(source, /Host reopened verification: a validation result is required/);
   assert.match(source, /visible\.delete\('advance_task_phase'\)/);
+  assert.match(source, /Corrected unavailable downloaded-source id/);
+  assert.match(source, /completionVerifierNudges < 3/);
 });
 
 test('task plans may begin research after initial host analysis activity', () => {
@@ -187,6 +189,7 @@ test('evidence store cites only deliberate host evidence, not browser telemetry'
   assert.equal(page.isNewSource, true);
   assert.deepEqual(evidence.sources().map(item => item.url), ['https://dev.example.test/', 'https://dev.example.test/static/app.js']);
   assert.equal(evidence.getDownload('web-1').name, 'app.js');
+  assert.deepEqual(evidence.downloadsList(), [{ id: 'web-1', url: 'https://dev.example.test/static/app.js', name: 'app.js', text: true }]);
   assert.equal(evidenceStoreSource.includes('separate from browser telemetry'), true);
 });
 

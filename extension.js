@@ -795,6 +795,13 @@ function readDownloadedWebFile(id, startLine, endLine, pattern, flags, startOffs
   }
   return `Downloaded web file: ${item.name} (${item.url})\n` + readFileContent(content, startLine, endLine, pattern, flags);
 }
+function resolveDownloadedEvidenceId(requestedId) {
+  const requested = String(requestedId || '');
+  if (activeEvidenceStore.getDownload(requested)) return { id: requested, corrected: false };
+  const candidates = activeEvidenceStore.downloadsList().filter(item => item.text);
+  if (candidates.length === 1) return { id: candidates[0].id, corrected: true, available: candidates };
+  return { id: '', corrected: false, available: candidates };
+}
 function searchDownloadedWebFile(id, query, maxResults) {
   const item = activeEvidenceStore.getDownload(String(id || '')); const needle = String(query || '');
   if (!item) return 'No downloaded web file with that id exists in this task.';
@@ -1075,8 +1082,14 @@ async function executeToolRaw(call) {
     if (call.function.name === 'browser_open') return await browserOpen(args.url, args.browserId, args.waitMs);
     if (call.function.name === 'web_fetch') return await webFetch(args.url);
     if (call.function.name === 'web_download') return await webDownload(args.url);
-    if (call.function.name === 'read_downloaded_web_file') return readDownloadedWebFile(args.id, args.startLine, args.endLine, args.pattern, args.flags, args.startOffset, args.endOffset);
-    if (call.function.name === 'search_downloaded_web_file') return searchDownloadedWebFile(args.id, args.query, args.maxResults);
+    if (call.function.name === 'read_downloaded_web_file' || call.function.name === 'search_downloaded_web_file') {
+      const resolved = resolveDownloadedEvidenceId(args.id);
+      if (!resolved.id) return `Tool error: no downloaded web file with id ${JSON.stringify(String(args.id || ''))} exists in this task. Available text source ids: ${resolved.available.map(item => `${item.id} (${item.name})`).join(', ') || '(none)'}.`;
+      if (resolved.corrected) log(`Corrected unavailable downloaded-source id ${JSON.stringify(String(args.id || ''))} to the only available source ${resolved.id}.`);
+      return call.function.name === 'read_downloaded_web_file'
+        ? readDownloadedWebFile(resolved.id, args.startLine, args.endLine, args.pattern, args.flags, args.startOffset, args.endOffset)
+        : searchDownloadedWebFile(resolved.id, args.query, args.maxResults);
+    }
     if (call.function.name === 'write_file') {
       updateTaskUi('implement', 'active', 'Applying workspace change.');
       const target = resolveTarget(args.path); if (isSensitiveTarget(target)) return 'Blocked by guardrail: sensitive file requires manual editing outside the agent.'; if (!fullSystem() && matchesProtected(target)) return 'Blocked by guardrail: protected system path.';
@@ -1425,7 +1438,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
         if (!completion.ok) {
           activeStreams.delete(streamId);
           postUi('assistantClear', { id: streamId });
-          if (completionVerifierNudges < 1) {
+          if (completionVerifierNudges < 3) {
             completionVerifierNudges++;
             if (['missing_validation', 'failed_checks'].includes(completion.reason) && completion.phase) {
               const reopened = activeTaskRuntime?.reopen(completion.phase, completion.reason === 'missing_validation' ? 'Host reopened verification: a validation result is required.' : 'Host reopened implementation: a verification check failed.');
