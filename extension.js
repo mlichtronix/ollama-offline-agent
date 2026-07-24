@@ -1022,6 +1022,16 @@ function toolsForTaskPhase(candidates, requirePlan = false) {
   return candidates.filter(tool => visible.has(tool.function.name));
 }
 
+function compactToolCallProtocol(visibleTools) {
+  const actions = (visibleTools || []).map(tool => {
+    const definition = tool?.function || {}; const properties = Object.keys(definition.parameters?.properties || {});
+    const required = definition.parameters?.required || [];
+    const shape = properties.length ? `{${properties.map(name => `${name}${required.includes(name) ? '' : '?'}: value`).join(', ')}}` : '{}';
+    return `- ${definition.name} ${shape}`;
+  }).join('\n');
+  return `For this one host-requested compatibility turn, the host will parse a compact JSON action instead of a native tool call. Return exactly one JSON object and nothing else in this form: {"name":"one listed action","arguments":{...}}. Do not use XML, Markdown fences, explanations, or a tool schema. Choose one action that is valid in the current host phase.\n\nAllowed actions:\n${actions}`;
+}
+
 async function filesRecursive(dir, base, result) {
   const ignored = new Set(['.git', '.ollama-agent', 'node_modules', '.next', 'dist', 'build', '.venv', '__pycache__']);
   let entries;
@@ -1200,10 +1210,10 @@ function fallbackMasterCandidates(health, { needsVision = false } = {}) {
   return health.filter(worker => worker.status === 'available').filter(worker => !(normalizeEndpoint(worker.endpoint) === primaryEndpoint && worker.model === primaryModel)).filter(worker => !needsVision || (worker.profile?.capabilities || []).map(value => String(value).toLowerCase()).includes('vision')).filter(worker => !requestedContext || !worker.profile?.contextLength || Number(worker.profile.contextLength) >= requestedContext).sort((left, right) => workerSpeed(right) - workerSpeed(left) || left.name.localeCompare(right.name));
 }
 function masterRuntimeForWorker(worker) { return { client: workerPool.client(worker), model: worker.model, name: worker.name, endpoint: worker.endpoint, contextWindow: Number(config().get('contextWindow', 0)) }; }
-async function chatWithMasterFailover(messages, onChunk, taskTools, session, toolChoice) {
+async function chatWithMasterFailover(messages, onChunk, taskTools, session, toolChoice, requestOptions = {}) {
   let streamedContent = '';
   for (;;) {
-    try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current, toolChoice); }
+    try { return await chat(messages, partial => { if (partial.content) streamedContent += partial.content; onChunk?.(partial); }, taskTools, session.current, toolChoice, requestOptions); }
     catch (error) {
       if (!isEndpointLimitError(error) || !session.fallbacks.length) throw error;
       session.limitedKeys.add(masterRuntimeKey(session.current));
@@ -1216,11 +1226,11 @@ async function chatWithMasterFailover(messages, onChunk, taskTools, session, too
     }
   }
 }
-async function chat(messages, onChunk, taskTools = tools, runtime = {}, toolChoice) {
+async function chat(messages, onChunk, taskTools = tools, runtime = {}, toolChoice, requestOptions = {}) {
   const controller = createActiveAbortController();
   try {
     return await (runtime.client || ollama).chat({
-      model: runtime.model || config().get('model'), messages, tools: taskTools, toolChoice,
+      model: runtime.model || config().get('model'), messages, tools: taskTools, toolChoice, ...requestOptions,
       temperature: Number(config().get('temperature', 0.2)),
       contextWindow: Number(runtime.contextWindow ?? config().get('contextWindow', 0)),
       signal: controller.signal, onChunk,
@@ -1352,6 +1362,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
   let recoveryNudges = 0;
   let emptyResponseNudges = 0;
   let invalidOutputNudges = 0;
+  let compatibilityToolMode = false;
   let completionVerifierNudges = 0;
   const failedToolCalls = new Map();
   const completedLookupCalls = new Set();
@@ -1373,7 +1384,8 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
       activeTaskTools = toolsForTaskPhase(taskTools, requiresPlan);
       throwIfCancelled(); if (!promptRead) setPromptState(promptId, 'delivered');
       const requireToolAction = requiresPlan && !['review', 'complete'].includes(activeTaskRuntime?.activePhase() || 'work');
-      const data = await chatWithMasterFailover(messages, partial => {
+      let data;
+      try { data = await chatWithMasterFailover(messages, partial => {
         if (!promptRead) { promptRead = true; setPromptState(promptId, 'read'); }
         if (partial.thinking) { if (!thinkingStarted) { output.appendLine('Thinking:'); thinkingStarted = true; } output.append(partial.thinking); }
         if (partial.content) {
@@ -1388,7 +1400,17 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
             if (delta) postUi('assistantDelta', { id: streamId, delta, createdAt: stream.createdAt });
           }
         }
-      }, activeTaskTools, masterSession, requireToolAction ? 'required' : undefined);
+      }, compatibilityToolMode ? [] : activeTaskTools, masterSession, compatibilityToolMode ? undefined : (requireToolAction ? 'required' : undefined), compatibilityToolMode ? { format: 'json', disableThinking: true, numPredict: 320 } : {}); }
+      catch (error) {
+        if (requireToolAction && !compatibilityToolMode && /generation loop detected|generation exceeded/i.test(String(error?.message || error))) {
+          compatibilityToolMode = true;
+          messages.push({ role: 'user', content: compactToolCallProtocol(activeTaskTools) });
+          log('Native tool turn looped; retrying once with the compact JSON compatibility protocol.');
+          updateTaskUi(activeTaskRuntime?.activePhase() || 'work', 'active', 'Retrying the tool action with the compact compatibility protocol.');
+          continue;
+        }
+        throw error;
+      }
       // A stop may arrive while an endpoint is producing its final network
       // chunk. Do not turn that late chunk into a persisted answer.
       throwIfCancelled();
@@ -1407,9 +1429,10 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           activeStreams.delete(streamId); postUi('assistantClear', { id: streamId });
           if (invalidOutputNudges < 1) {
             invalidOutputNudges++;
-            messages.push({ role: 'user', content: requiresPlan && !(activeTaskRuntime?.ui.plan || []).length ? 'This execute task must begin with one native set_task_plan call. Do not write the plan as chat text: submit concise ordered steps through that tool.' : `The last model output was rejected by the runtime (${classified.reason}). Do not repeat internal tool instructions, XML, JSON schemas, or a plan. Make one valid native tool call, or provide a concise final answer based only on completed actions.` });
-            log(`Model adapter rejected invalid output: ${classified.reason}. Requesting one concrete continuation.`);
-            updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model output was invalid; requesting a concrete continuation.');
+            compatibilityToolMode = true;
+            messages.push({ role: 'user', content: compactToolCallProtocol(activeTaskTools) });
+            log(`Model adapter rejected invalid output: ${classified.reason}. Retrying with the compact JSON compatibility protocol.`);
+            updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model output was invalid; retrying the tool action with the compact compatibility protocol.');
             continue;
           }
           throw new Error(`Model produced invalid agent output twice (${classified.reason}). Select a model with reliable native tool calling or retry the task.`);
@@ -1419,9 +1442,16 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           postUi('assistantClear', { id: streamId });
           if (emptyResponseNudges < 1) {
             emptyResponseNudges++;
-            messages.push({ role: 'user', content: 'You returned no final answer and made no tool call. Continue the active task now: either call the next necessary tool or provide a concise final answer with the actions actually completed and any blocker.' });
-            log('Empty-response recovery guard: asking the agent to continue (1/1).');
-            updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model returned no answer; requesting a concrete continuation.');
+            if (requireToolAction) {
+              compatibilityToolMode = true;
+              messages.push({ role: 'user', content: compactToolCallProtocol(activeTaskTools) });
+              log('Empty native tool turn; retrying with the compact JSON compatibility protocol.');
+              updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model returned no tool action; retrying with the compact compatibility protocol.');
+            } else {
+              messages.push({ role: 'user', content: 'You returned no final answer and made no tool call. Continue the active task now: either call the next necessary tool or provide a concise final answer with the actions actually completed and any blocker.' });
+              log('Empty-response recovery guard: asking the agent to continue (1/1).');
+              updateTaskUi(activeTaskRuntime?.activePhase() || 'analyze', 'active', 'Model returned no answer; requesting a concrete continuation.');
+            }
             continue;
           }
           throw new Error('Model returned no final answer after an automatic recovery attempt. Select a more capable model or retry the task.');
@@ -1481,7 +1511,7 @@ async function ask(initialTask, providedId, attachments = [], replyTo, continuat
           if (idempotentLookupTools.has(call.function.name)) completedLookupCalls.add(callKey);
           if (new Set(['search_chat_history', 'read_chat_messages', 'list_files', 'read_file', 'search_text', 'web_search', 'list_browsers', 'browser_open', 'web_fetch', 'web_download', 'read_downloaded_web_file', 'search_downloaded_web_file']).has(call.function.name)) activePhaseEvidenceActions++;
           if (call.function.name === 'advance_task_phase') activePhaseEvidenceActions = 0;
-          invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0;
+          invalidOutputNudges = 0; compatibilityToolMode = false; emptyResponseNudges = 0; completionVerifierNudges = 0;
         }
         if (isTestCommand(call)) failingTest = testFailed(outcome.content) ? outcome.content : '';
         log(`${call.function.name} [${outcome.kind}]: ${truncate(outcome.content, 1200)}`);

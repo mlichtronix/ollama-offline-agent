@@ -63,6 +63,29 @@ test('Ollama client bounds tool turns and aborts repeating streamed prose', asyn
   } finally { global.fetch = originalFetch; }
 });
 
+test('Ollama client supports a compact JSON compatibility turn without tools', async () => {
+  const originalFetch = global.fetch;
+  let request;
+  const encoder = new TextEncoder();
+  global.fetch = async (_url, init) => {
+    request = JSON.parse(init.body);
+    const body = new ReadableStream({ start(controller) {
+      controller.enqueue(encoder.encode(`${JSON.stringify({ message: { content: '{"name":"list_files","arguments":{"directory":"."}}' } })}\n`));
+      controller.close();
+    } });
+    return { ok: true, body };
+  };
+  try {
+    const client = new OllamaClient({ getEndpoint: () => 'http://127.0.0.1:11434' });
+    const result = await client.chat({ model: 'qwen3:8b', messages: [], tools: [], temperature: 0.2, format: 'json', disableThinking: true, numPredict: 320 });
+    assert.equal(result.message.content, '{"name":"list_files","arguments":{"directory":"."}}');
+    assert.deepEqual(request.tools, []);
+    assert.equal(request.format, 'json');
+    assert.equal(request.think, false);
+    assert.equal(request.options.num_predict, 320);
+  } finally { global.fetch = originalFetch; }
+});
+
 test('worker definitions accept only complete HTTP read-only endpoints', () => {
   const workers = normalizeWorkers([
     { id: 'one', name: 'LAN worker', endpoint: 'http://192.168.1.20:11434/', model: 'qwen3:8b' },
@@ -287,7 +310,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(packageJson, /"ollamaOffline\.webEnabled"[^\n]+"default": true/);
   assert.match(source, /function webEnabled\(\) \{ return config\(\)\.get\('webEnabled', true\); \}/);
   assert.match(ollamaClientSource, /num_ctx/);
-  assert.match(ollamaClientSource, /num_predict: toolCalling \? 1600 : 4096/);
+  assert.match(ollamaClientSource, /num_predict: Number\(numPredict\) > 0/);
+  assert.match(ollamaClientSource, /disableThinking/);
   assert.match(ollamaClientSource, /tool_choice: toolChoice/);
   assert.match(ollamaClientSource, /Model generation loop detected/);
   assert.match(ollamaClientSource, /stream: true/);
@@ -301,6 +325,8 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /lastAssistant \? \[lastAssistant\] : \[\]/);
   assert.match(source, /latestAssistantContext/);
   assert.match(source, /latestUserContext/);
+  assert.match(source, /compactToolCallProtocol/);
+  assert.match(source, /compact JSON compatibility protocol/);
   assert.match(source, /benchmark: true/);
   assert.match(source, /Candidate previous user request/);
   assert.match(source, /function steer\(/);
@@ -428,7 +454,7 @@ test('Ollama context and streaming remain configured', () => {
   assert.match(source, /classifyModelMessage/);
   assert.match(source, /classified\.source === 'native' \? message : \{ role: 'assistant', content: '', tool_calls: calls \}/);
   assert.match(source, /Model adapter rejected invalid output/);
-  assert.match(source, /invalidOutputNudges = 0; emptyResponseNudges = 0; completionVerifierNudges = 0/);
+  assert.match(source, /invalidOutputNudges = 0; compatibilityToolMode = false; emptyResponseNudges = 0; completionVerifierNudges = 0/);
   assert.match(source, /Do not flash the model's own tool schema/);
   assert.match(modelAdapterSource, /unavailable_tool:/);
   assert.match(modelAdapterSource, /function isToolProtocolPrefix/);
